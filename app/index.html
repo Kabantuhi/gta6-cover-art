@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -8,74 +8,58 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">
-    <h1><span class="brand-coast">NEON COAST</span> <span class="brand-studio">Cover Studio</span></h1>
-    <p>Turn any photo and a caption into GTA-style poster cover art. Offline, no upload.</p>
+  <div>
+    <h1>NEON COAST <span>Cover Studio</span></h1>
+    <p class="tagline">Turn any photo and a caption into GTA-style poster cover art. Offline, no upload.</p>
   </div>
-  <div class="history">
-    <button id="undo-btn" type="button" disabled>Undo</button>
-    <button id="redo-btn" type="button" disabled>Redo</button>
+  <div class="top-actions">
+    <button id="undoBtn" type="button" disabled>Undo</button>
+    <button id="redoBtn" type="button" disabled>Redo</button>
   </div>
 </header>
-
-<main class="workspace">
+<main class="studio">
   <section class="controls">
     <div class="panel">
-      <h2>1 &middot; Layout</h2>
-      <div id="layout-picks" class="picks"></div>
+      <h2>1 · Layout</h2>
+      <div class="btnrow" id="layoutRow"></div>
     </div>
-
     <div class="panel">
-      <h2>2 &middot; Colour grade</h2>
-      <div id="grade-picks" class="picks swatches"></div>
-      <label class="check"><input id="grain-check" type="checkbox" checked> Film grain</label>
-      <label class="check"><input id="vignette-check" type="checkbox" checked> Vignette</label>
+      <h2>2 · Colour grade</h2>
+      <div class="swatches" id="gradeRow"></div>
+      <label class="check"><input type="checkbox" id="grainChk" checked> Film grain</label>
+      <label class="check"><input type="checkbox" id="vignetteChk" checked> Vignette</label>
     </div>
-
     <div class="panel">
-      <h2>3 &middot; Export size</h2>
-      <div id="size-picks" class="picks"></div>
-      <div class="actions">
-        <button id="export-btn" type="button" class="primary">Export PNG</button>
-        <button id="export-all-btn" type="button">All four</button>
+      <h2>3 · Photos</h2>
+      <div class="btnrow">
+        <button id="samplePier" type="button">Pier sample</button>
+        <button id="sampleBlvd" type="button">Boulevard sample</button>
+        <label class="upload">Upload photos <input id="fileInput" type="file" accept="image/*" multiple hidden></label>
       </div>
+      <p class="hint">Click a panel to select it, drag to move its photo, scroll to zoom. Each panel keeps its own crop.</p>
+      <div class="thumbrow" id="thumbRow"></div>
     </div>
-
     <div class="panel">
-      <h2>4 &middot; Caption</h2>
-      <label class="field">Title
-        <input id="title-input" type="text" value="Neon Shore" maxlength="24">
-      </label>
-      <label class="field">Subtitle
-        <input id="subtitle-input" type="text" value="Night Drive" maxlength="24">
-      </label>
-      <label class="field">Badge ribbon
-        <input id="badge-input" type="text" value="LAUNCH WEEK" maxlength="16">
-      </label>
-      <div class="stars-row">
-        <span>Heat</span>
-        <span id="stars" class="stars"></span>
-      </div>
+      <h2>4 · Caption</h2>
+      <label>Title <input id="titleInput" type="text" value="BOULEVARD QUEEN" maxlength="24"></label>
+      <label>Subtitle <input id="subtitleInput" type="text" value="Night Drive" maxlength="32"></label>
+      <label>Heat <input id="starsInput" type="range" min="0" max="5" step="1" value="4"> <span id="starsLabel">★★★★☆</span></label>
+      <label class="check"><input type="checkbox" id="ribbonChk" checked> “LAUNCH WEEK” ribbon</label>
     </div>
-
     <div class="panel">
-      <h2>5 &middot; Photos</h2>
-      <div class="actions">
-        <button id="upload-btn" type="button" class="primary">Upload photos</button>
-        <button id="fill-all-btn" type="button">Fill all panels</button>
+      <h2>5 · Export size</h2>
+      <div class="btnrow" id="sizeRow"></div>
+      <div class="btnrow">
+        <button id="exportBtn" type="button" class="primary">Export PNG</button>
+        <button id="exportAllBtn" type="button">All four</button>
       </div>
-      <input id="upload-input" type="file" accept="image/*" multiple hidden>
-      <div id="tray" class="tray"></div>
-      <p class="note">Click a photo to put it in the selected panel. Your photos never leave this machine.</p>
+      <p class="hint" id="exportNote"></p>
     </div>
   </section>
-
-  <section class="stage-wrap">
-    <canvas id="stage" width="1080" height="1080"></canvas>
-    <p class="hint">Click a panel to select it &middot; drag to move its photo &middot; scroll to zoom</p>
+  <section class="stage">
+    <div id="coverStage" class="cover-stage"></div>
   </section>
 </main>
-
 <script src="src/cover.js"></script>
 <script src="src/main.js"></script>
 </body>

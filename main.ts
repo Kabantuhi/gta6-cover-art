@@ -1,43 +1,40 @@
-// Neon Coast Cover Studio — hand-in program.
-// Node 22, standard library only: copies app/ and screenshots/ from this
-// repository into the output folder and writes dossier.json with the
-// vendored vendor/makefun-app.ts library. Outside the grader,
-// MAKEFUN_OUTPUT_DIR stands in for /output. Running it twice writes the
-// same bytes both times: the copies are byte copies and buildDossier is
-// deterministic, so nothing here stamps a time or a random value.
-
-import { cpSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+// Neon Coast Cover Studio — entrypoint for make.fun (round 4 build).
+// Copies app/ and screenshots/ into the output directory and writes
+// dossier.json from them with the kit's buildDossier, so the handed-in
+// entry is exactly what the scorer reads. Runs with plain `node main.ts`
+// (erasable TypeScript, Node 22+): no flags, no build, no install.
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-app.ts';
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR
-  ? resolve(process.env.MAKEFUN_OUTPUT_DIR)
-  : '/output';
+const repoRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
+const wanted = process.env.MAKEFUN_OUTPUT_DIR ?? 'out';
+const outDir = resolve(repoRoot, wanted);
+const appDir = join(repoRoot, 'app');
+const shotsDir = join(repoRoot, 'screenshots');
 
-const caps = {
+if (!existsSync(appDir)) throw new Error('app/ is missing in ' + repoRoot);
+if (!existsSync(shotsDir)) throw new Error('screenshots/ is missing in ' + repoRoot);
+
+rmSync(outDir, { recursive: true, force: true });
+mkdirSync(outDir, { recursive: true });
+cpSync(appDir, join(outDir, 'app'), { recursive: true });
+cpSync(shotsDir, join(outDir, 'screenshots'), { recursive: true });
+
+const dossier = buildDossier(outDir, {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
   app_max_files: 993,
   app_max_bytes: 50331648,
-};
-
-function copyTree(name) {
-  const from = join(repoRoot, name);
-  const to = join(outDir, name);
-  cpSync(from, to, { recursive: true, dereference: false });
-  return from;
+});
+const dossierPath = join(outDir, 'dossier.json');
+writeFileSync(dossierPath, dossier);
+// Read it back and check it parses, so a bad dossier fails loudly here
+// instead of being handed in silently.
+const check = JSON.parse(readFileSync(dossierPath, 'utf8'));
+if (typeof check.text !== 'string' || !check.text.includes('## App')) {
+  throw new Error('dossier.json is missing the ## App text block');
 }
-
-rmSync(outDir, { recursive: true, force: true });
-mkdirSync(outDir, { recursive: true });
-copyTree('app');
-copyTree('screenshots');
-
-const dossier = buildDossier(outDir, caps);
-writeFileSync(join(outDir, 'dossier.json'), dossier);
-
-const appBytes = statSync(join(outDir, 'app')).size;
-console.log(`handed in: app/ + screenshots/ -> ${outDir}`);
-console.log(`dossier.json: ${dossier.length} bytes (app dir entry: ${appBytes} bytes)`);
+console.log('wrote ' + dossierPath);
+console.log('dossier: ' + dossier.length + ' bytes, ' + check.images.length + ' screenshots, cover #' + check.cover + ', text ' + Buffer.byteLength(check.text) + ' bytes');
