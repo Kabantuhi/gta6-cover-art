@@ -1,421 +1,520 @@
-// Neon Coast Cover Studio — wires the page: layout/grade/size pickers, caption
-// editing, per-panel photos with drag-to-move and scroll-to-zoom, undo/redo,
-// PNG export in the four post sizes, and the ?shot= scenes for screenshots.
-import { drawCover, layoutGeometry, panelCount, LAYOUTS, GRADES, SIZES } from './cover.js';
-import { runShot } from './shots.js';
+// Neon Coast Cover Studio — editor wiring: state, controls, history,
+// pointer crop/zoom, PNG export and the ?shot= query mode for screenshots.
+import { LAYOUTS, GRADES, EXPORT_SIZES, panelAt, drawCover, renderCoverCanvas } from './cover.js';
 
-const canvas = document.getElementById('stage');
-const statusEl = document.getElementById('status');
-const exportSizeEl = document.getElementById('exportSize');
+const $ = (id) => document.getElementById(id);
+const stage = $('stage');
 
-// Photos the app knows: the two free samples plus anything the user uploads.
-// Each entry is { key, label, img } — img is a loaded HTMLImageElement.
-const photos = [];
-let activePanel = 0;
+const SAMPLES = [
+  { name: 'Pier', src: 'samples/pier.jpg' },
+  { name: 'Boulevard', src: 'samples/boulevard.jpg' },
+];
 
-function blankPanel() {
-  return { src: null, scale: 1, dx: 0, dy: 0 };
-}
-
-const state = {
-  layout: 'grid',
-  grade: 'sunset',
-  size: 'square',
-  title: 'Neon Shore',
-  subtitle: 'Night Drive',
-  badge: 'Launch Week',
-  heat: 4,
-  panels: [blankPanel(), blankPanel(), blankPanel(), blankPanel()],
-};
-
-const history = [];
-let historyAt = -1;
-
-function snapshot() {
-  return JSON.parse(JSON.stringify(state));
-}
-
-function pushHistory() {
-  history.length = historyAt + 1;
-  history.push(snapshot());
-  if (history.length > 60) history.shift();
-  historyAt = history.length - 1;
-  refreshUndoRedo();
-}
-
-function applySnapshot(snap) {
-  Object.assign(state, JSON.parse(JSON.stringify(snap)));
-  syncPanelsToLayout(false);
-  syncControls();
-  redraw();
-}
-
-function refreshUndoRedo() {
-  document.getElementById('undo').disabled = historyAt <= 0;
-  document.getElementById('redo').disabled = historyAt >= history.length - 1;
-}
-
-function syncPanelsToLayout(keepPhotos = true) {
-  const n = panelCount(state.layout);
-  const old = state.panels;
-  const next = [];
-  for (let i = 0; i < n; i++) {
-    if (keepPhotos && old[i]) next.push(old[i]);
-    else next.push(blankPanel());
-  }
-  state.panels = next;
-  if (activePanel >= n) activePanel = 0;
-}
-
-function currentSize() {
-  return SIZES.find((s) => s.id === state.size) || SIZES[0];
-}
-
-function resolvedImages() {
-  return state.panels.map((p) => {
-    if (!p.src) return null;
-    const found = photos.find((ph) => ph.key === p.src);
-    return found ? found.img : null;
-  });
-}
-
-function redraw() {
-  drawCover(canvas, state, resolvedImages());
-  exportSizeEl.textContent = currentSize().label;
-}
-
-function loadImage(url) {
+function loadImage(src) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = url;
+    img.onerror = () => reject(new Error('could not load ' + src));
+    img.src = src;
   });
 }
 
-async function addPhoto(key, label, url) {
-  if (photos.some((p) => p.key === key)) return photos.find((p) => p.key === key);
-  const img = await loadImage(url);
-  const entry = { key, label, img };
-  photos.push(entry);
-  renderLibrary();
-  return entry;
+function panelCount(layoutId) {
+  return LAYOUTS[layoutId].panels().length;
 }
 
-// ---- controls -------------------------------------------------------------
-
-function buildChoiceButtons(el, items, current, onPick) {
-  el.innerHTML = '';
-  items.forEach(([id, label, style]) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.setAttribute('aria-pressed', String(id === current));
-    if (style) b.style.background = style;
-    b.addEventListener('click', () => {
-      onPick(id);
-      el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', 'false'));
-      b.setAttribute('aria-pressed', 'true');
-    });
-    el.appendChild(b);
-  });
-}
-
-function renderLayoutButtons() {
-  buildChoiceButtons(
-    document.getElementById('layouts'),
-    Object.entries(LAYOUTS).map(([id, l]) => [id, l.name]),
-    state.layout,
-    (id) => { pushHistory(); state.layout = id; syncPanelsToLayout(true); renderPanelButtons(); redraw(); },
-  );
-}
-
-function renderGradeButtons() {
-  const el = document.getElementById('grades');
-  el.innerHTML = '';
-  Object.entries(GRADES).forEach(([id, g]) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.title = g.name;
-    b.setAttribute('aria-label', g.name);
-    b.setAttribute('aria-pressed', String(id === state.grade));
-    b.style.background = `linear-gradient(135deg, ${g.stops[0]}, ${g.stops[1]} 55%, ${g.stops[2]})`;
-    b.addEventListener('click', () => {
-      pushHistory();
-      state.grade = id;
-      el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', 'false'));
-      b.setAttribute('aria-pressed', 'true');
-      redraw();
-    });
-    el.appendChild(b);
-  });
-}
-
-function renderSizeButtons() {
-  buildChoiceButtons(
-    document.getElementById('sizes'),
-    SIZES.map((s) => [s.id, s.label]),
-    state.size,
-    (id) => {
-      pushHistory();
-      state.size = id;
-      const s = currentSize();
-      canvas.width = s.w;
-      canvas.height = s.h;
-      redraw();
-    },
-  );
-}
-
-function renderPanelButtons() {
-  buildChoiceButtons(
-    document.getElementById('panels'),
-    state.panels.map((_, i) => [`p${i}`, `Panel ${i + 1}`]),
-    `p${activePanel}`,
-    (id) => { activePanel = Number(id.slice(1)); renderLibrary(); },
-  );
-}
-
-function renderHeatStars() {
-  const el = document.getElementById('heatStars');
-  el.textContent = '★'.repeat(state.heat) + '☆'.repeat(5 - state.heat);
-}
-
-function renderLibrary() {
-  const el = document.getElementById('library');
-  el.innerHTML = '';
-  const selected = state.panels[activePanel]?.src;
-  photos.forEach((p) => {
-    const img = document.createElement('img');
-    img.src = p.img.src;
-    img.alt = p.label;
-    img.title = p.label;
-    img.setAttribute('aria-pressed', String(p.key === selected));
-    img.addEventListener('click', () => {
-      pushHistory();
-      state.panels[activePanel].src = p.key;
-      state.panels[activePanel].scale = 1;
-      state.panels[activePanel].dx = 0;
-      state.panels[activePanel].dy = 0;
-      renderLibrary();
-      redraw();
-    });
-    el.appendChild(img);
-  });
-}
-
-function syncControls() {
-  document.getElementById('title').value = state.title;
-  document.getElementById('subtitle').value = state.subtitle;
-  document.getElementById('badge').value = state.badge;
-  renderHeatStars();
-  renderLayoutButtons();
-  renderGradeButtons();
-  renderSizeButtons();
-  renderPanelButtons();
-  renderLibrary();
-  const s = currentSize();
-  canvas.width = s.w;
-  canvas.height = s.h;
-}
-
-// ---- caption inputs --------------------------------------------------------
-
-function bindText(id, key) {
-  const el = document.getElementById(id);
-  el.addEventListener('input', () => {
-    state[key] = el.value;
-    redraw();
-  });
-  el.addEventListener('change', pushHistory);
-}
-bindText('title', 'title');
-bindText('subtitle', 'subtitle');
-bindText('badge', 'badge');
-
-document.getElementById('heatDown').addEventListener('click', () => {
-  if (state.heat <= 0) return;
-  pushHistory();
-  state.heat -= 1;
-  renderHeatStars();
-  redraw();
-});
-document.getElementById('heatUp').addEventListener('click', () => {
-  if (state.heat >= 5) return;
-  pushHistory();
-  state.heat += 1;
-  renderHeatStars();
-  redraw();
-});
-
-// ---- photo uploads ---------------------------------------------------------
-
-document.getElementById('upload').addEventListener('change', async (e) => {
-  const files = [...e.target.files];
-  for (const file of files) {
-    const url = URL.createObjectURL(file);
-    const entry = await addPhoto(`upload-${Date.now()}-${file.name}`, file.name, url);
-    pushHistory();
-    state.panels[activePanel].src = entry.key;
-    state.panels[activePanel].scale = 1;
-    state.panels[activePanel].dx = 0;
-    state.panels[activePanel].dy = 0;
+function defaultSlots(layoutId, photoCount) {
+  const n = panelCount(layoutId);
+  const slots = [];
+  for (let i = 0; i < n; i++) {
+    slots.push({ photo: photoCount > 0 ? i % photoCount : 0, zoom: 1, ox: 0, oy: 0 });
   }
-  renderLibrary();
-  redraw();
-  e.target.value = '';
-});
+  return slots;
+}
 
-document.getElementById('fillAll').addEventListener('click', () => {
-  const src = state.panels[activePanel]?.src;
-  if (!src) { statusEl.textContent = 'Pick a photo for the selected panel first.'; return; }
-  pushHistory();
-  state.panels.forEach((p) => { p.src = src; p.scale = 1; p.dx = 0; p.dy = 0; });
-  redraw();
-  statusEl.textContent = 'Every panel now uses the same photo.';
-});
+const state = {
+  layout: 'hero',
+  grade: 'sunset',
+  grain: true,
+  vignette: true,
+  title: 'Boulevard Queen',
+  sub: 'Night Drive',
+  badge: 'LAUNCH WEEK',
+  heat: 4,
+  size: '1080x1080',
+  photos: [], // { name, src, img }
+  slotsByLayout: {},
+  selected: 0,
+};
 
-document.getElementById('resetCrop').addEventListener('click', () => {
-  pushHistory();
-  const p = state.panels[activePanel];
-  p.scale = 1; p.dx = 0; p.dy = 0;
-  redraw();
-});
+function currentSlots() {
+  if (!state.slotsByLayout[state.layout]) {
+    state.slotsByLayout[state.layout] = defaultSlots(state.layout, state.photos.length);
+  }
+  return state.slotsByLayout[state.layout];
+}
 
-// ---- canvas drag / zoom -----------------------------------------------------
+function currentSize() {
+  return EXPORT_SIZES.find((s) => s.id === state.size) || EXPORT_SIZES[0];
+}
 
-function canvasPoint(e) {
-  const r = canvas.getBoundingClientRect();
+function renderState() {
   return {
-    x: ((e.clientX - r.left) / r.width) * canvas.width,
-    y: ((e.clientY - r.top) / r.height) * canvas.height,
+    layout: state.layout,
+    grade: state.grade,
+    grain: state.grain,
+    vignette: state.vignette,
+    title: state.title,
+    sub: state.sub,
+    badge: state.badge,
+    heat: state.heat,
+    photos: state.photos.map((p) => p.img),
+    slots: currentSlots(),
   };
 }
 
-function hitPanel(x, y) {
-  const geo = layoutGeometry(state.layout, canvas.width, canvas.height);
-  for (let i = geo.panels.length - 1; i >= 0; i--) {
-    const p = geo.panels[i];
-    if (p.titleCell) continue;
-    if (x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h) return i;
-  }
-  return -1;
+// ---- history (undo / redo) ---------------------------------------------
+const past = [];
+const future = [];
+
+function snapshot() {
+  return JSON.stringify({
+    layout: state.layout,
+    grade: state.grade,
+    grain: state.grain,
+    vignette: state.vignette,
+    title: state.title,
+    sub: state.sub,
+    badge: state.badge,
+    heat: state.heat,
+    size: state.size,
+    slotsByLayout: state.slotsByLayout,
+    selected: state.selected,
+    photos: state.photos.map((p) => ({ name: p.name, src: p.src })),
+  });
 }
 
-let dragging = null;
-canvas.addEventListener('pointerdown', (e) => {
-  const pt = canvasPoint(e);
-  const hit = hitPanel(pt.x, pt.y);
+async function restore(json) {
+  const snap = JSON.parse(json);
+  state.layout = snap.layout;
+  state.grade = snap.grade;
+  state.grain = snap.grain;
+  state.vignette = snap.vignette;
+  state.title = snap.title;
+  state.sub = snap.sub;
+  state.badge = snap.badge;
+  state.heat = snap.heat;
+  state.size = snap.size;
+  state.slotsByLayout = snap.slotsByLayout;
+  state.selected = snap.selected;
+  const loaded = [];
+  for (const p of snap.photos) {
+    try {
+      loaded.push({ name: p.name, src: p.src, img: await loadImage(p.src) });
+    } catch {
+      // a photo that no longer loads is skipped; its slots fall back below
+    }
+  }
+  if (loaded.length > 0) state.photos = loaded;
+  for (const key of Object.keys(state.slotsByLayout)) {
+    for (const slot of state.slotsByLayout[key]) {
+      slot.photo = Math.max(0, Math.min(state.photos.length - 1, slot.photo || 0));
+    }
+  }
+  state.selected = Math.max(0, Math.min(currentSlots().length - 1, state.selected || 0));
+  syncUI();
+  render();
+}
+
+function commit() {
+  past.push(snapshot());
+  if (past.length > 60) past.shift();
+  future.length = 0;
+  syncUndoRedo();
+}
+
+function applyChange(fn) {
+  commit();
+  fn();
+  syncUI();
+  render();
+}
+
+async function undo() {
+  if (past.length === 0) return;
+  future.push(snapshot());
+  await restore(past.pop());
+  syncUndoRedo();
+}
+
+async function redo() {
+  if (future.length === 0) return;
+  past.push(snapshot());
+  await restore(future.pop());
+  syncUndoRedo();
+}
+
+function syncUndoRedo() {
+  $('undoBtn').disabled = past.length === 0;
+  $('redoBtn').disabled = future.length === 0;
+}
+
+// ---- rendering -----------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const coverMode = params.get('shot') === 'cover';
+
+function render() {
+  const size = currentSize();
+  if (coverMode) {
+    stage.width = size.w;
+    stage.height = size.h;
+  } else {
+    const previewW = 880;
+    stage.width = previewW;
+    stage.height = Math.round((previewW * size.h) / size.w);
+  }
+  const ctx = stage.getContext('2d');
+  drawCover(ctx, stage.width, stage.height, renderState());
+  if (!coverMode) drawSelection(ctx);
+}
+
+function drawSelection(ctx) {
+  const W = stage.width, H = stage.height;
+  const panels = LAYOUTS[state.layout].panels();
+  const panel = panels[state.selected];
+  if (!panel) return;
+  ctx.save();
+  ctx.strokeStyle = '#ff2d92';
+  ctx.lineWidth = Math.max(3, W * 0.004);
+  if (panel.clip) {
+    ctx.beginPath();
+    panel.clip.forEach(([nx, ny], i) => {
+      if (i === 0) ctx.moveTo(nx * W, ny * H);
+      else ctx.lineTo(nx * W, ny * H);
+    });
+    ctx.closePath();
+    ctx.stroke();
+  } else {
+    const cx = (panel.x + panel.w / 2) * W;
+    const cy = (panel.y + panel.h / 2) * H;
+    ctx.translate(cx, cy);
+    if (panel.rot) ctx.rotate((panel.rot * Math.PI) / 180);
+    ctx.strokeRect((-panel.w * W) / 2, (-panel.h * H) / 2, panel.w * W, panel.h * H);
+  }
+  ctx.restore();
+}
+
+// ---- controls ------------------------------------------------------------
+function markActive(container, attr, value) {
+  for (const btn of container.querySelectorAll('button')) {
+    btn.classList.toggle('active', btn.dataset[attr] === value);
+  }
+}
+
+function syncUI() {
+  markActive($('layoutBtns'), 'layout', state.layout);
+  markActive($('gradeBtns'), 'grade', state.grade);
+  markActive($('sizeBtns'), 'size', state.size);
+  $('grainChk').checked = state.grain;
+  $('vignetteChk').checked = state.vignette;
+  if ($('titleInput').value !== state.title) $('titleInput').value = state.title;
+  if ($('subInput').value !== state.sub) $('subInput').value = state.sub;
+  if ($('badgeInput').value !== state.badge) $('badgeInput').value = state.badge;
+  for (const btn of $('heatStars').querySelectorAll('button')) {
+    btn.classList.toggle('lit', Number(btn.dataset.heat) <= state.heat);
+  }
+  const tray = $('photoTray');
+  tray.querySelectorAll('img').forEach((img, i) => {
+    img.classList.toggle('active', currentSlots()[state.selected]?.photo === i);
+  });
+}
+
+function buildHeatStars() {
+  const box = $('heatStars');
+  box.innerHTML = '';
+  for (let n = 1; n <= 5; n++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.dataset.heat = String(n);
+    btn.textContent = '★';
+    btn.setAttribute('aria-label', n + ' stars');
+    btn.addEventListener('click', () => applyChange(() => { state.heat = n; }));
+    box.appendChild(btn);
+  }
+}
+
+function buildTray() {
+  const tray = $('photoTray');
+  tray.innerHTML = '';
+  state.photos.forEach((photo, i) => {
+    const img = document.createElement('img');
+    img.src = photo.src;
+    img.alt = photo.name;
+    img.title = photo.name;
+    img.addEventListener('click', () => {
+      applyChange(() => { currentSlots()[state.selected].photo = i; });
+    });
+    tray.appendChild(img);
+  });
+  syncUI();
+}
+
+async function addPhoto(name, src) {
+  const img = await loadImage(src);
+  commit();
+  state.photos.push({ name, src, img });
+  buildTray();
+  render();
+}
+
+// ---- pointer crop / zoom ---------------------------------------------------
+let dragging = false;
+let dragCommitted = false;
+let lastX = 0, lastY = 0;
+let lastWheelCommit = 0;
+
+function coverPoint(event) {
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: ((event.clientX - rect.left) / rect.width) * stage.width,
+    y: ((event.clientY - rect.top) / rect.height) * stage.height,
+  };
+}
+
+stage.addEventListener('pointerdown', (event) => {
+  if (coverMode) return;
+  const { x, y } = coverPoint(event);
+  const hit = panelAt(state.layout, stage.width, stage.height, x, y);
   if (hit < 0) return;
-  activePanel = hit;
-  renderPanelButtons();
-  renderLibrary();
-  dragging = { x: pt.x, y: pt.y, moved: false };
-  canvas.setPointerCapture(e.pointerId);
+  state.selected = hit;
+  dragging = true;
+  dragCommitted = false;
+  lastX = x;
+  lastY = y;
+  stage.classList.add('dragging');
+  stage.setPointerCapture(event.pointerId);
+  syncUI();
+  render();
 });
-canvas.addEventListener('pointermove', (e) => {
+
+stage.addEventListener('pointermove', (event) => {
   if (!dragging) return;
-  const pt = canvasPoint(e);
-  const geo = layoutGeometry(state.layout, canvas.width, canvas.height);
-  const rect = geo.panels[activePanel];
-  if (!rect) return;
-  const p = state.panels[activePanel];
-  p.dx += (pt.x - dragging.x) / rect.w;
-  p.dy += (pt.y - dragging.y) / rect.h;
-  p.dx = Math.max(-0.6, Math.min(0.6, p.dx));
-  p.dy = Math.max(-0.6, Math.min(0.6, p.dy));
-  dragging.x = pt.x;
-  dragging.y = pt.y;
-  dragging.moved = true;
-  redraw();
+  const { x, y } = coverPoint(event);
+  const panels = LAYOUTS[state.layout].panels();
+  const panel = panels[state.selected];
+  const slot = currentSlots()[state.selected];
+  if (!panel || !slot) return;
+  if (!dragCommitted) {
+    commit();
+    dragCommitted = true;
+  }
+  slot.ox = Math.max(-0.6, Math.min(0.6, slot.ox + (x - lastX) / (panel.w * stage.width)));
+  slot.oy = Math.max(-0.6, Math.min(0.6, slot.oy + (y - lastY) / (panel.h * stage.height)));
+  lastX = x;
+  lastY = y;
+  render();
 });
-canvas.addEventListener('pointerup', () => {
-  if (dragging?.moved) pushHistory();
-  dragging = null;
-});
-canvas.addEventListener('wheel', (e) => {
-  e.preventDefault();
-  const pt = canvasPoint(e);
-  const hit = hitPanel(pt.x, pt.y);
-  if (hit < 0) return;
-  activePanel = hit;
-  const p = state.panels[activePanel];
-  p.scale = Math.max(1, Math.min(4, p.scale * (e.deltaY < 0 ? 1.08 : 0.93)));
-  redraw();
+
+function endDrag() {
+  dragging = false;
+  stage.classList.remove('dragging');
+}
+
+stage.addEventListener('pointerup', endDrag);
+stage.addEventListener('pointercancel', endDrag);
+
+stage.addEventListener('wheel', (event) => {
+  if (coverMode) return;
+  event.preventDefault();
+  const slot = currentSlots()[state.selected];
+  if (!slot) return;
+  const now = Date.now();
+  if (now - lastWheelCommit > 500) {
+    commit();
+    lastWheelCommit = now;
+  }
+  slot.zoom = Math.max(1, Math.min(4, slot.zoom * Math.exp(-event.deltaY * 0.0012)));
+  render();
 }, { passive: false });
 
-// ---- undo / redo ------------------------------------------------------------
-
-document.getElementById('undo').addEventListener('click', () => {
-  if (historyAt <= 0) return;
-  historyAt -= 1;
-  applySnapshot(history[historyAt]);
-  refreshUndoRedo();
-});
-document.getElementById('redo').addEventListener('click', () => {
-  if (historyAt >= history.length - 1) return;
-  historyAt += 1;
-  applySnapshot(history[historyAt]);
-  refreshUndoRedo();
-});
-
-// ---- export -----------------------------------------------------------------
-
-function renderAtSize(size) {
-  const off = document.createElement('canvas');
-  off.width = size.w;
-  off.height = size.h;
-  drawCover(off, state, resolvedImages());
-  return off;
+// ---- export ----------------------------------------------------------------
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
-function downloadCanvas(off, name) {
+function exportSize(size) {
   return new Promise((resolve) => {
-    off.toBlob((blob) => {
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      resolve();
+    const canvas = renderCoverCanvas(size.w, size.h, renderState());
+    canvas.toBlob((blob) => {
+      if (blob) downloadBlob(blob, `neon-coast-${size.id}.png`);
+      resolve(Boolean(blob));
     }, 'image/png');
   });
 }
 
-document.getElementById('export').addEventListener('click', async () => {
-  const size = currentSize();
-  await downloadCanvas(renderAtSize(size), `neon-coast-${size.w}x${size.h}.png`);
-  statusEl.textContent = `Saved neon-coast-${size.w}x${size.h}.png`;
+$('exportBtn').addEventListener('click', async () => {
+  await exportSize(currentSize());
 });
 
-document.getElementById('exportAll').addEventListener('click', async () => {
-  statusEl.textContent = 'Exporting all sizes…';
-  for (const size of SIZES) {
-    await downloadCanvas(renderAtSize(size), `neon-coast-${size.w}x${size.h}.png`);
+$('exportAllBtn').addEventListener('click', async () => {
+  for (const size of EXPORT_SIZES) {
+    await exportSize(size);
+    await new Promise((r) => setTimeout(r, 300));
   }
-  statusEl.textContent = 'Saved all 4 sizes.';
 });
 
-// ---- boot -------------------------------------------------------------------
+// ---- wire the control panel --------------------------------------------------
+$('layoutBtns').addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-layout]');
+  if (!btn) return;
+  applyChange(() => {
+    state.layout = btn.dataset.layout;
+    state.selected = 0;
+    currentSlots();
+  });
+});
 
-async function boot() {
-  await addPhoto('pier', 'Pier (sample)', 'samples/pier.jpg');
-  await addPhoto('boulevard', 'Boulevard (sample)', 'samples/boulevard.jpg');
-  // Default scene: the pier photo in the first panel of the grid.
-  state.panels[0].src = 'pier';
-  try {
-    await document.fonts.load('80px Anton');
-    await document.fonts.load('40px Pacifico');
-  } catch { /* fonts fall back to system faces */ }
+$('gradeBtns').addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-grade]');
+  if (!btn) return;
+  applyChange(() => { state.grade = btn.dataset.grade; });
+});
 
-  const query = new URLSearchParams(location.search);
-  if (query.get('shot')) {
-    await runShot(query, { state, photos, canvas, redraw, syncControls, pushHistory });
-  } else {
-    syncControls();
-    pushHistory();
-    redraw();
-  }
+$('grainChk').addEventListener('change', (event) => {
+  applyChange(() => { state.grain = event.target.checked; });
+});
+
+$('vignetteChk').addEventListener('change', (event) => {
+  applyChange(() => { state.vignette = event.target.checked; });
+});
+
+$('sizeBtns').addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-size]');
+  if (!btn) return;
+  state.size = btn.dataset.size;
+  syncUI();
+  render();
+});
+
+let captionSnapshot = null;
+for (const [input, key] of [[$('titleInput'), 'title'], [$('subInput'), 'sub'], [$('badgeInput'), 'badge']]) {
+  // The pre-edit snapshot is taken on the first keystroke of an editing
+  // session, before that keystroke mutates the state, so undo steps back to
+  // the caption as it was when the user started typing.
+  input.addEventListener('input', () => {
+    if (captionSnapshot === null) captionSnapshot = snapshot();
+    state[key] = input.value;
+    render();
+  });
+  input.addEventListener('change', () => {
+    if (captionSnapshot !== null) {
+      past.push(captionSnapshot);
+      if (past.length > 60) past.shift();
+      future.length = 0;
+      captionSnapshot = null;
+      syncUndoRedo();
+    }
+  });
 }
 
-boot();
+$('fileInput').addEventListener('change', async (event) => {
+  for (const file of event.target.files) {
+    const src = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsDataURL(file);
+    });
+    await addPhoto(file.name, src);
+  }
+  event.target.value = '';
+});
+
+$('samplePier').addEventListener('click', async () => {
+  if (!state.photos.some((p) => p.name === 'Pier')) await addPhoto('Pier', 'samples/pier.jpg');
+});
+$('sampleBlvd').addEventListener('click', async () => {
+  if (!state.photos.some((p) => p.name === 'Boulevard')) await addPhoto('Boulevard', 'samples/boulevard.jpg');
+});
+
+$('undoBtn').addEventListener('click', undo);
+$('redoBtn').addEventListener('click', redo);
+document.addEventListener('keydown', (event) => {
+  const tag = (event.target.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+    event.preventDefault();
+    undo();
+  } else if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'y' || (event.key.toLowerCase() === 'z' && event.shiftKey))) {
+    event.preventDefault();
+    redo();
+  }
+});
+
+// ---- start: query params, samples, fonts --------------------------------------
+async function start() {
+  if (coverMode) document.body.classList.add('cover-shot');
+
+  const wantPhoto = params.get('photo');
+  const wantPhoto2 = params.get('photo2');
+  const first = wantPhoto
+    ? SAMPLES.find((s) => s.name.toLowerCase() === wantPhoto.toLowerCase()) || SAMPLES[1]
+    : SAMPLES[1];
+  const second = wantPhoto2
+    ? SAMPLES.find((s) => s.name.toLowerCase() === wantPhoto2.toLowerCase()) || SAMPLES[0]
+    : SAMPLES[0];
+  for (const sample of [first, second]) {
+    if (state.photos.some((p) => p.name === sample.name)) continue;
+    try {
+      state.photos.push({ name: sample.name, src: sample.src, img: await loadImage(sample.src) });
+    } catch {
+      // a missing sample leaves the tray empty for that slot; the app still runs
+    }
+  }
+
+  if (params.get('layout') && LAYOUTS[params.get('layout')]) state.layout = params.get('layout');
+  if (params.get('grade') && GRADES[params.get('grade')]) state.grade = params.get('grade');
+  if (params.get('caption')) state.title = params.get('caption');
+  if (params.get('sub')) state.sub = params.get('sub');
+  if (params.get('badge') !== null) state.badge = params.get('badge') || '';
+  if (params.get('heat')) state.heat = Math.max(0, Math.min(5, Number(params.get('heat')) || 0));
+  if (params.get('size') && EXPORT_SIZES.some((s) => s.id === params.get('size'))) state.size = params.get('size');
+  if (params.get('grain') === '0') state.grain = false;
+  if (params.get('vignette') === '0') state.vignette = false;
+
+  buildHeatStars();
+  buildTray();
+  syncUI();
+  syncUndoRedo();
+
+  try {
+    await Promise.all([
+      document.fonts.load('40px Anton'),
+      document.fonts.load('40px Pacifico'),
+      document.fonts.ready,
+    ]);
+  } catch {
+    // if a font fails to load, the canvas falls back to sans-serif and still draws
+  }
+  render();
+  window.__ready = true;
+}
+
+window.__coverStudio = {
+  exportDataURL(w, h) {
+    const canvas = renderCoverCanvas(w, h, renderState());
+    return canvas.toDataURL('image/png');
+  },
+  get state() {
+    return { layout: state.layout, grade: state.grade, title: state.title, size: state.size };
+  },
+};
+
+const readyFallback = setTimeout(() => { window.__ready = true; }, 6000);
+start().finally(() => clearTimeout(readyFallback));
