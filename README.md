@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/gta6-cover-art-01/Kabantuhi/gta6-cover-art/rank.svg)](https://make.fun/bounty/gta6-cover-art-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01)
 [![reward](https://make.fun/badge/gta6-cover-art-01/Kabantuhi/gta6-cover-art/reward.svg)](https://make.fun/bounty/gta6-cover-art-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-cover-art-01)
 
-An offline web app that turns your photos and a caption into GTA-style
+An offline web app that turns photos and a caption into GTA-style
 multi-panel poster art, ready to share as a PNG. Built for the
 [Make GTA 6 Cover Art](https://make.fun/bounty/gta6-cover-art-01) bounty on
 [make.fun](https://make.fun).
@@ -13,7 +13,7 @@ multi-panel poster art, ready to share as a PNG. Built for the
 
 - **Six multi-panel layouts** — a four-panel grid, a hero panel with three
   beside it, one full-bleed photo, a nine-panel grid with a title block in
-  the middle, three tilted snapshots, and a diagonal duo.
+  the middle, three tilted polaroid snapshots, and a diagonal duo.
 - **Your photos, your crop** — drop in your own pictures or use the two
   included samples. One photo can fill every panel, or each panel can hold
   a different one. Click a panel to pick it, drag to slide its photo around,
@@ -52,9 +52,9 @@ into the output folder and writes `dossier.json` with the vendored
 ## Originality
 
 Nothing here comes from Rockstar Games: no logo, no artwork, no game font.
-The lettering uses Anton and Pacifico, both shipped under the SIL Open Font
-License (see `app/fonts/`), and the sample photos were made with an image
-model for this project.
+The lettering uses Anton and Pacifico, both shipped as WOFF2 under the SIL
+Open Font License (see `app/fonts/`), and the sample photos were made with
+an image model for this project.
 
 ## License
 

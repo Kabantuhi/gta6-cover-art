@@ -9,86 +9,74 @@
 <body>
 <header class="topbar">
   <div class="brand">
-    <h1>NEON COAST <span>COVER STUDIO</span></h1>
-    <p>Turn any photo and caption into GTA-style poster cover art. Offline, no upload.</p>
+    <h1><span class="brand-coast">NEON COAST</span> <span class="brand-studio">Cover Studio</span></h1>
+    <p>Turn any photo and a caption into GTA-style poster cover art. Offline, no upload.</p>
   </div>
-  <div class="top-actions">
-    <button id="undoBtn" type="button" title="Undo (Ctrl+Z)">Undo</button>
-    <button id="redoBtn" type="button" title="Redo (Ctrl+Y)">Redo</button>
+  <div class="history">
+    <button id="undo-btn" type="button" disabled>Undo</button>
+    <button id="redo-btn" type="button" disabled>Redo</button>
   </div>
 </header>
-<main class="studio">
-  <aside class="panel">
-    <section>
+
+<main class="workspace">
+  <section class="controls">
+    <div class="panel">
       <h2>1 &middot; Layout</h2>
-      <div class="btn-grid" id="layoutBtns">
-        <button data-layout="grid" type="button">Four-panel grid</button>
-        <button data-layout="hero" type="button">Hero + three</button>
-        <button data-layout="bleed" type="button">Full bleed</button>
-        <button data-layout="nine" type="button">Nine-panel grid</button>
-        <button data-layout="tilt" type="button">Tilted snapshot</button>
-        <button data-layout="duo" type="button">Diagonal duo</button>
-      </div>
-    </section>
-    <section>
+      <div id="layout-picks" class="picks"></div>
+    </div>
+
+    <div class="panel">
       <h2>2 &middot; Colour grade</h2>
-      <div class="swatches" id="gradeBtns">
-        <button data-grade="sunset" type="button" title="Sunset" aria-label="Sunset grade"></button>
-        <button data-grade="neon" type="button" title="Neon Nights" aria-label="Neon Nights grade"></button>
-        <button data-grade="vice" type="button" title="Vice Pink" aria-label="Vice Pink grade"></button>
-        <button data-grade="teal" type="button" title="Teal Dusk" aria-label="Teal Dusk grade"></button>
-        <button data-grade="golden" type="button" title="Golden Hour" aria-label="Golden Hour grade"></button>
-      </div>
-      <label class="check"><input type="checkbox" id="grainChk" checked> Film grain</label>
-      <label class="check"><input type="checkbox" id="vignetteChk" checked> Vignette</label>
-    </section>
-    <section>
+      <div id="grade-picks" class="picks swatches"></div>
+      <label class="check"><input id="grain-check" type="checkbox" checked> Film grain</label>
+      <label class="check"><input id="vignette-check" type="checkbox" checked> Vignette</label>
+    </div>
+
+    <div class="panel">
       <h2>3 &middot; Export size</h2>
-      <div class="btn-grid" id="sizeBtns">
-        <button data-size="1080x1080" type="button">1080 &times; 1080</button>
-        <button data-size="1080x1350" type="button">1080 &times; 1350</button>
-        <button data-size="1920x1080" type="button">1920 &times; 1080</button>
-        <button data-size="1080x1920" type="button">1080 &times; 1920</button>
+      <div id="size-picks" class="picks"></div>
+      <div class="actions">
+        <button id="export-btn" type="button" class="primary">Export PNG</button>
+        <button id="export-all-btn" type="button">All four</button>
       </div>
-      <div class="export-row">
-        <button id="exportBtn" type="button" class="primary">Export PNG</button>
-        <button id="exportAllBtn" type="button">All four</button>
-      </div>
-    </section>
-    <section>
+    </div>
+
+    <div class="panel">
       <h2>4 &middot; Caption</h2>
       <label class="field">Title
-        <input id="titleInput" type="text" value="Boulevard Queen" maxlength="40" autocomplete="off">
+        <input id="title-input" type="text" value="Neon Shore" maxlength="24">
       </label>
       <label class="field">Subtitle
-        <input id="subInput" type="text" value="Night Drive" maxlength="40" autocomplete="off">
+        <input id="subtitle-input" type="text" value="Night Drive" maxlength="24">
       </label>
-      <label class="field">Badge
-        <input id="badgeInput" type="text" value="LAUNCH WEEK" maxlength="20" autocomplete="off">
+      <label class="field">Badge ribbon
+        <input id="badge-input" type="text" value="LAUNCH WEEK" maxlength="16">
       </label>
-      <div class="heat-row">
+      <div class="stars-row">
         <span>Heat</span>
-        <div class="heat" id="heatStars" role="radiogroup" aria-label="Heat rating"></div>
+        <span id="stars" class="stars"></span>
       </div>
-    </section>
-    <section>
+    </div>
+
+    <div class="panel">
       <h2>5 &middot; Photos</h2>
-      <label class="upload">Upload photos
-        <input id="fileInput" type="file" accept="image/*" multiple>
-      </label>
-      <div class="sample-row">
-        <button id="samplePier" type="button">Sample: Pier</button>
-        <button id="sampleBlvd" type="button">Sample: Boulevard</button>
+      <div class="actions">
+        <button id="upload-btn" type="button" class="primary">Upload photos</button>
+        <button id="fill-all-btn" type="button">Fill all panels</button>
       </div>
-      <div class="tray" id="photoTray"></div>
-      <p class="tray-hint">Click a tray photo to put it in the selected panel.</p>
-    </section>
-  </aside>
+      <input id="upload-input" type="file" accept="image/*" multiple hidden>
+      <div id="tray" class="tray"></div>
+      <p class="note">Click a photo to put it in the selected panel. Your photos never leave this machine.</p>
+    </div>
+  </section>
+
   <section class="stage-wrap">
-    <canvas id="stage"></canvas>
+    <canvas id="stage" width="1080" height="1080"></canvas>
     <p class="hint">Click a panel to select it &middot; drag to move its photo &middot; scroll to zoom</p>
   </section>
 </main>
-<script type="module" src="src/main.js"></script>
+
+<script src="src/cover.js"></script>
+<script src="src/main.js"></script>
 </body>
 </html>

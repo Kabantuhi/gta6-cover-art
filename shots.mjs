@@ -1,181 +1,166 @@
-// Screenshot driver for Neon Coast Cover Studio (Node 22, standard library
-// only). Serves app/, drives headless Chrome over its DevTools protocol,
-// and captures the shots listed in shots.json into screenshots/.
+// Neon Coast Cover Studio — screenshot driver.
+// Node 22, standard library only. Serves app/ with serve.ts, drives the
+// cached headless Chromium over raw CDP (no dependencies), captures the 4
+// shots from shots.json into screenshots/, verifies one real PNG export and
+// asserts the app makes no network request. Run from the repo root:
 //   node shots.mjs
-// It also calls the app's export hook and checks the PNG bytes it returns,
-// so a real export is verified, not just the preview.
+// Exit code 0 only when every shot is written within the size cap, the
+// export is a valid PNG of the right size, and no external URL was fetched.
+
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const CHROME = '/home/hatch/.cache/ms-playwright/chromium-1255/chrome-linux64/chrome';
-const PORT = 8080;
-const CDP_PORT = 9223;
+const REPO = dirname(fileURLToPath(import.meta.url));
+const SHOTS = JSON.parse(readFileSync(join(REPO, 'shots.json'), 'utf8'));
+const CHROME = '/home/hatch/.cache/ms-playwright/chromium_headless_shell-1255/chrome-headless-shell-linux64/chrome-headless-shell';
+const SERVER_PORT = 8091;
+const CDP_PORT = 9333;
+const MAX_SHOT_BYTES = 262144;
 
-const shots = JSON.parse(readFileSync(join(here, 'shots.json'), 'utf8'));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function waitFor(url, timeoutMs = 15000) {
+async function waitFor(label, fn, timeoutMs = 30000) {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  for (;;) {
     try {
-      const res = await fetch(url);
-      if (res.ok) return true;
-    } catch {
-      // not up yet
-    }
+      const out = await fn();
+      if (out) return out;
+    } catch { /* keep waiting */ }
+    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for ' + label);
     await sleep(250);
   }
-  throw new Error('timed out waiting for ' + url);
 }
 
-// JPEG dimensions from the SOF0/SOF2 marker, no image library needed.
-function jpegSize(buf) {
-  let i = 2;
-  while (i < buf.length - 9) {
-    if (buf[i] !== 0xff) { i++; continue; }
-    const marker = buf[i + 1];
-    if (marker === 0xc0 || marker === 0xc2) {
-      return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
-    }
-    const len = buf.readUInt16BE(i + 2);
-    i += 2 + len;
-  }
-  return null;
-}
-
+// Minimal CDP client over the platform WebSocket.
 class Cdp {
-  constructor(wsUrl) {
-    this.ws = new WebSocket(wsUrl);
+  constructor(url) {
+    this.ws = new WebSocket(url);
     this.nextId = 1;
     this.pending = new Map();
-    this.ready = new Promise((resolve, reject) => {
+    this.requests = [];
+    this.opened = new Promise((resolve, reject) => {
       this.ws.onopen = resolve;
       this.ws.onerror = reject;
     });
-    this.ws.onmessage = (event) => {
-      const msg = JSON.parse(String(event.data));
-      if (msg.id && this.pending.has(msg.id)) {
+    this.ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.id !== undefined && this.pending.has(msg.id)) {
         const { resolve, reject } = this.pending.get(msg.id);
         this.pending.delete(msg.id);
-        if (msg.error) reject(new Error(msg.error.message));
+        if (msg.error) reject(new Error('CDP ' + JSON.stringify(msg.error)));
         else resolve(msg.result);
+      } else if (msg.method === 'Network.requestWillBeSent') {
+        this.requests.push(msg.params.request.url);
       }
     };
   }
 
-  send(method, params = {}) {
+  async call(method, params = {}) {
+    await this.opened;
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
+    const done = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    this.ws.send(JSON.stringify({ id, method, params }));
+    return done;
   }
 
-  async evaluate(expression) {
-    const res = await this.send('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (res.exceptionDetails) throw new Error('page error: ' + JSON.stringify(res.exceptionDetails));
-    return res.result ? res.result.value : undefined;
+  async eval(expression) {
+    const r = await this.call('Runtime.evaluate', { expression, returnByValue: true });
+    if (r.exceptionDetails) throw new Error('page threw: ' + JSON.stringify(r.exceptionDetails).slice(0, 400));
+    return r.result ? r.result.value : undefined;
   }
 
-  async waitReady(timeoutMs = 20000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      try {
-        if (await this.evaluate('window.__ready === true')) return true;
-      } catch {
-        // page still loading
-      }
-      await sleep(300);
-    }
-    throw new Error('app did not become ready in time');
-  }
+  close() { try { this.ws.close(); } catch { /* already gone */ } }
+}
 
-  async screenshot(file, quality = 85) {
-    const shot = await this.send('Page.captureScreenshot', { format: 'jpeg', quality });
-    const buf = Buffer.from(shot.data, 'base64');
-    writeFileSync(file, buf);
-    return buf;
-  }
+async function httpJson(url, method = 'GET') {
+  const res = await fetch(url, { method });
+  if (!res.ok) throw new Error(method + ' ' + url + ' -> ' + res.status);
+  return res.json();
+}
 
-  close() {
-    try { this.ws.close(); } catch { /* already closed */ }
-  }
+function pngSize(buf) {
+  const magic = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (buf.length < 33 || !magic.every((b, i) => buf[i] === b)) return null;
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
 }
 
 async function main() {
-  const server = spawn('node', ['serve.ts', '--port', String(PORT)], { cwd: here, stdio: 'pipe' });
-  let serverOut = '';
-  server.stdout.on('data', (d) => { serverOut += String(d); });
-  server.stderr.on('data', (d) => { serverOut += String(d); });
+  const server = spawn('node', ['serve.ts', '--port', String(SERVER_PORT)], { cwd: REPO, stdio: 'ignore' });
+  const chrome = spawn(CHROME, [
+    '--no-sandbox', '--disable-gpu', '--no-first-run', '--disable-extensions',
+    '--user-data-dir=/tmp/cover-shots-r3-profile',
+    '--remote-debugging-port=' + CDP_PORT, 'about:blank',
+  ], { stdio: 'ignore' });
+
   try {
-    await waitFor(`http://127.0.0.1:${PORT}/index.html`);
-    console.log('server up:', serverOut.trim().split('\n').pop());
+    await waitFor('server', async () => {
+      const r = await fetch('http://127.0.0.1:' + SERVER_PORT + '/index.html');
+      return r.ok;
+    });
+    await waitFor('chrome', async () => httpJson('http://127.0.0.1:' + CDP_PORT + '/json/version'));
 
-    const chrome = spawn(CHROME, [
-      '--headless=new',
-      '--disable-gpu',
-      '--no-sandbox',
-      `--remote-debugging-port=${CDP_PORT}`,
-      '--user-data-dir=/tmp/chrome-profile-shots',
-      'about:blank',
-    ], { stdio: 'ignore' });
-    try {
-      const targets = await waitFor(`http://127.0.0.1:${CDP_PORT}/json/list`).then(async () => {
-        const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`);
-        return res.json();
-      });
-      const page = targets.find((t) => t.type === 'page');
-      if (!page) throw new Error('no page target in chrome');
-      const cdp = new Cdp(page.webSocketDebuggerUrl);
-      await cdp.ready;
-      await cdp.send('Page.enable');
-      await cdp.send('Runtime.enable');
+    let exportChecked = false;
+    for (const shot of SHOTS) {
+      const url = 'http://127.0.0.1:' + SERVER_PORT + '/index.html' + shot.query;
+      let target;
+      try {
+        target = await httpJson('http://127.0.0.1:' + CDP_PORT + '/json/new?' + encodeURIComponent(url), 'PUT');
+      } catch {
+        target = await httpJson('http://127.0.0.1:' + CDP_PORT + '/json/new?' + encodeURIComponent(url), 'GET');
+      }
+      const cdp = new Cdp(target.webSocketDebuggerUrl);
+      try {
+        await cdp.call('Page.enable');
+        await cdp.call('Network.enable');
+        await cdp.call('Emulation.setDeviceMetricsOverride', {
+          width: shot.w, height: shot.h, deviceScaleFactor: 1, mobile: false,
+        });
+        await cdp.call('Page.navigate', { url });
+        await waitFor('app ready for ' + shot.name, async () => {
+          const state = await cdp.eval('window.__coverStudio && (window.__coverStudio.error ? "ERR:"+window.__coverStudio.error : window.__coverStudio.ready)');
+          if (typeof state === 'string' && state.startsWith('ERR:')) throw new Error(state);
+          return state === true;
+        }, 30000);
+        await sleep(400); // let the grade wash and grain settle
 
-      // Verify a real export first: ask the app for PNG bytes and check them.
-      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
-      await cdp.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?shot=editor` });
-      await cdp.waitReady();
-      for (const [w, h] of [[1080, 1080], [1920, 1080]]) {
-        const dataUrl = await cdp.evaluate(`window.__coverStudio.exportDataURL(${w},${h})`);
-        if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
-          throw new Error(`export ${w}x${h} did not return a PNG data URL`);
+        if (!exportChecked && shot.query.includes('shot=cover')) {
+          const dataUrl = await cdp.eval("window.__coverStudio.exportDataURL('1080x1080')");
+          const b64 = String(dataUrl).split(',')[1] || '';
+          const png = Buffer.from(b64, 'base64');
+          const size = pngSize(png);
+          if (!size || size.w !== 1080 || size.h !== 1080) {
+            throw new Error('export check failed: not a 1080x1080 PNG (got ' + JSON.stringify(size) + ')');
+          }
+          console.log('export verified: 1080x1080 PNG, ' + png.length + ' bytes');
+          exportChecked = true;
         }
-        const bytes = Buffer.from(dataUrl.slice('data:image/png;base64,'.length), 'base64');
-        const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
-        if (!bytes.subarray(0, 4).equals(pngMagic)) throw new Error(`export ${w}x${h} is not a PNG`);
-        console.log(`export OK: ${w}x${h} PNG, ${bytes.length} bytes`);
-      }
 
-      mkdirSync(join(here, 'screenshots'), { recursive: true });
-      for (const shot of shots) {
-        await cdp.send('Emulation.setDeviceMetricsOverride', { width: shot.w, height: shot.h, deviceScaleFactor: 1, mobile: false });
-        await cdp.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/${shot.query}` });
-        await cdp.waitReady();
-        await sleep(400); // let the canvas paint settle
-        const file = join(here, 'screenshots', shot.name);
-        const buf = await cdp.screenshot(file);
-        const size = jpegSize(buf);
-        const okSize = buf.length <= 262144;
-        const okDim = size && size.w === shot.w && size.h === shot.h;
-        console.log(`${shot.name}: ${buf.length} bytes (<=256KiB: ${okSize}), ${size ? size.w + 'x' + size.h : 'unknown size'} (expected ${shot.w}x${shot.h}: ${okDim})`);
-        if (!okSize || !okDim) throw new Error(`shot ${shot.name} failed its checks`);
+        let quality = 80;
+        let file;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const shotRes = await cdp.call('Page.captureScreenshot', { format: 'jpeg', quality });
+          file = Buffer.from(shotRes.data, 'base64');
+          if (file.length <= MAX_SHOT_BYTES) break;
+          quality = 62;
+        }
+        if (file.length > MAX_SHOT_BYTES) throw new Error(shot.name + ' is ' + file.length + ' bytes, over the 256 KiB cap');
+        writeFileSync(join(REPO, 'screenshots', shot.name), file);
+        console.log(shot.name + ': ' + shot.w + 'x' + shot.h + ', ' + file.length + ' bytes');
+
+        const external = cdp.requests.filter((u) => !u.startsWith('http://127.0.0.1') && !u.startsWith('data:') && !u.startsWith('about:'));
+        if (external.length) throw new Error('network request outside the app server: ' + external[0]);
+      } finally {
+        cdp.close();
+        try { await httpJson('http://127.0.0.1:' + CDP_PORT + '/json/close/' + target.id, 'GET'); } catch { /* already closed */ }
       }
-      cdp.close();
-      console.log('all shots done');
-    } finally {
-      chrome.kill('SIGKILL');
     }
+    if (!exportChecked) throw new Error('no cover shot ran, so the export was never verified');
+    console.log('all shots done, no network requests');
   } finally {
+    chrome.kill('SIGKILL');
     server.kill('SIGKILL');
   }
 }

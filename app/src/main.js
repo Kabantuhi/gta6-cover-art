@@ -1,520 +1,449 @@
-// Neon Coast Cover Studio — editor wiring: state, controls, history,
-// pointer crop/zoom, PNG export and the ?shot= query mode for screenshots.
-import { LAYOUTS, GRADES, EXPORT_SIZES, panelAt, drawCover, renderCoverCanvas } from './cover.js';
+// Neon Coast Cover Studio — editor.
+// Owns the state, the controls, panel dragging and zooming, undo/redo, PNG
+// export and the ?shot= mode the screenshot driver uses. Everything runs
+// offline: photos are read from the machine, nothing is uploaded.
 
-const $ = (id) => document.getElementById(id);
-const stage = $('stage');
+(function () {
+  'use strict';
 
-const SAMPLES = [
-  { name: 'Pier', src: 'samples/pier.jpg' },
-  { name: 'Boulevard', src: 'samples/boulevard.jpg' },
-];
+  var SAMPLES = [
+    { id: 'pier', name: 'Pier', src: 'samples/pier.jpg' },
+    { id: 'boulevard', name: 'Boulevard', src: 'samples/boulevard.jpg' },
+  ];
 
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('could not load ' + src));
-    img.src = src;
-  });
-}
+  var EXPORT_SIZES = ['1080x1080', '1080x1350', '1920x1080', '1080x1920'];
 
-function panelCount(layoutId) {
-  return LAYOUTS[layoutId].panels().length;
-}
-
-function defaultSlots(layoutId, photoCount) {
-  const n = panelCount(layoutId);
-  const slots = [];
-  for (let i = 0; i < n; i++) {
-    slots.push({ photo: photoCount > 0 ? i % photoCount : 0, zoom: 1, ox: 0, oy: 0 });
+  function defaultPanels() {
+    var out = [];
+    for (var i = 0; i < 9; i++) out.push({ photo: 0, x: 0, y: 0, zoom: 1, rot: 0 });
+    return out;
   }
-  return slots;
-}
 
-const state = {
-  layout: 'hero',
-  grade: 'sunset',
-  grain: true,
-  vignette: true,
-  title: 'Boulevard Queen',
-  sub: 'Night Drive',
-  badge: 'LAUNCH WEEK',
-  heat: 4,
-  size: '1080x1080',
-  photos: [], // { name, src, img }
-  slotsByLayout: {},
-  selected: 0,
-};
-
-function currentSlots() {
-  if (!state.slotsByLayout[state.layout]) {
-    state.slotsByLayout[state.layout] = defaultSlots(state.layout, state.photos.length);
+  function defaultState() {
+    return {
+      layout: 'nine',
+      grade: 'neon',
+      grain: true,
+      vignette: true,
+      title: 'Neon Shore',
+      subtitle: 'Night Drive',
+      badge: 'LAUNCH WEEK',
+      stars: 4,
+      exportSize: '1080x1080',
+      photos: SAMPLES.slice(),
+      panels: defaultPanels(),
+    };
   }
-  return state.slotsByLayout[state.layout];
-}
 
-function currentSize() {
-  return EXPORT_SIZES.find((s) => s.id === state.size) || EXPORT_SIZES[0];
-}
+  var state = defaultState();
+  var images = {}; // photo id -> loaded HTMLImageElement
+  var selected = 0;
+  var undoStack = [];
+  var redoStack = [];
+  var stage = null;
+  var drag = null;
 
-function renderState() {
-  return {
-    layout: state.layout,
-    grade: state.grade,
-    grain: state.grain,
-    vignette: state.vignette,
-    title: state.title,
-    sub: state.sub,
-    badge: state.badge,
-    heat: state.heat,
-    photos: state.photos.map((p) => p.img),
-    slots: currentSlots(),
-  };
-}
+  // ---------------------------------------------------------------- photos
 
-// ---- history (undo / redo) ---------------------------------------------
-const past = [];
-const future = [];
-
-function snapshot() {
-  return JSON.stringify({
-    layout: state.layout,
-    grade: state.grade,
-    grain: state.grain,
-    vignette: state.vignette,
-    title: state.title,
-    sub: state.sub,
-    badge: state.badge,
-    heat: state.heat,
-    size: state.size,
-    slotsByLayout: state.slotsByLayout,
-    selected: state.selected,
-    photos: state.photos.map((p) => ({ name: p.name, src: p.src })),
-  });
-}
-
-async function restore(json) {
-  const snap = JSON.parse(json);
-  state.layout = snap.layout;
-  state.grade = snap.grade;
-  state.grain = snap.grain;
-  state.vignette = snap.vignette;
-  state.title = snap.title;
-  state.sub = snap.sub;
-  state.badge = snap.badge;
-  state.heat = snap.heat;
-  state.size = snap.size;
-  state.slotsByLayout = snap.slotsByLayout;
-  state.selected = snap.selected;
-  const loaded = [];
-  for (const p of snap.photos) {
-    try {
-      loaded.push({ name: p.name, src: p.src, img: await loadImage(p.src) });
-    } catch {
-      // a photo that no longer loads is skipped; its slots fall back below
-    }
-  }
-  if (loaded.length > 0) state.photos = loaded;
-  for (const key of Object.keys(state.slotsByLayout)) {
-    for (const slot of state.slotsByLayout[key]) {
-      slot.photo = Math.max(0, Math.min(state.photos.length - 1, slot.photo || 0));
-    }
-  }
-  state.selected = Math.max(0, Math.min(currentSlots().length - 1, state.selected || 0));
-  syncUI();
-  render();
-}
-
-function commit() {
-  past.push(snapshot());
-  if (past.length > 60) past.shift();
-  future.length = 0;
-  syncUndoRedo();
-}
-
-function applyChange(fn) {
-  commit();
-  fn();
-  syncUI();
-  render();
-}
-
-async function undo() {
-  if (past.length === 0) return;
-  future.push(snapshot());
-  await restore(past.pop());
-  syncUndoRedo();
-}
-
-async function redo() {
-  if (future.length === 0) return;
-  past.push(snapshot());
-  await restore(future.pop());
-  syncUndoRedo();
-}
-
-function syncUndoRedo() {
-  $('undoBtn').disabled = past.length === 0;
-  $('redoBtn').disabled = future.length === 0;
-}
-
-// ---- rendering -----------------------------------------------------------
-const params = new URLSearchParams(location.search);
-const coverMode = params.get('shot') === 'cover';
-
-function render() {
-  const size = currentSize();
-  if (coverMode) {
-    stage.width = size.w;
-    stage.height = size.h;
-  } else {
-    const previewW = 880;
-    stage.width = previewW;
-    stage.height = Math.round((previewW * size.h) / size.w);
-  }
-  const ctx = stage.getContext('2d');
-  drawCover(ctx, stage.width, stage.height, renderState());
-  if (!coverMode) drawSelection(ctx);
-}
-
-function drawSelection(ctx) {
-  const W = stage.width, H = stage.height;
-  const panels = LAYOUTS[state.layout].panels();
-  const panel = panels[state.selected];
-  if (!panel) return;
-  ctx.save();
-  ctx.strokeStyle = '#ff2d92';
-  ctx.lineWidth = Math.max(3, W * 0.004);
-  if (panel.clip) {
-    ctx.beginPath();
-    panel.clip.forEach(([nx, ny], i) => {
-      if (i === 0) ctx.moveTo(nx * W, ny * H);
-      else ctx.lineTo(nx * W, ny * H);
+  function loadImage(entry) {
+    if (images[entry.id]) return Promise.resolve(images[entry.id]);
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () { images[entry.id] = img; resolve(img); };
+      img.onerror = function () { reject(new Error('cannot load ' + entry.src)); };
+      img.src = entry.src;
     });
-    ctx.closePath();
-    ctx.stroke();
-  } else {
-    const cx = (panel.x + panel.w / 2) * W;
-    const cy = (panel.y + panel.h / 2) * H;
-    ctx.translate(cx, cy);
-    if (panel.rot) ctx.rotate((panel.rot * Math.PI) / 180);
-    ctx.strokeRect((-panel.w * W) / 2, (-panel.h * H) / 2, panel.w * W, panel.h * H);
   }
-  ctx.restore();
-}
 
-// ---- controls ------------------------------------------------------------
-function markActive(container, attr, value) {
-  for (const btn of container.querySelectorAll('button')) {
-    btn.classList.toggle('active', btn.dataset[attr] === value);
+  function loadAllPhotos() {
+    return Promise.all(state.photos.map(loadImage));
   }
-}
 
-function syncUI() {
-  markActive($('layoutBtns'), 'layout', state.layout);
-  markActive($('gradeBtns'), 'grade', state.grade);
-  markActive($('sizeBtns'), 'size', state.size);
-  $('grainChk').checked = state.grain;
-  $('vignetteChk').checked = state.vignette;
-  if ($('titleInput').value !== state.title) $('titleInput').value = state.title;
-  if ($('subInput').value !== state.sub) $('subInput').value = state.sub;
-  if ($('badgeInput').value !== state.badge) $('badgeInput').value = state.badge;
-  for (const btn of $('heatStars').querySelectorAll('button')) {
-    btn.classList.toggle('lit', Number(btn.dataset.heat) <= state.heat);
+  // ---------------------------------------------------------------- history
+
+  function snapshot() {
+    return JSON.parse(JSON.stringify({
+      layout: state.layout,
+      grade: state.grade,
+      grain: state.grain,
+      vignette: state.vignette,
+      title: state.title,
+      subtitle: state.subtitle,
+      badge: state.badge,
+      stars: state.stars,
+      exportSize: state.exportSize,
+      panels: state.panels,
+    }));
   }
-  const tray = $('photoTray');
-  tray.querySelectorAll('img').forEach((img, i) => {
-    img.classList.toggle('active', currentSlots()[state.selected]?.photo === i);
-  });
-}
 
-function buildHeatStars() {
-  const box = $('heatStars');
-  box.innerHTML = '';
-  for (let n = 1; n <= 5; n++) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.dataset.heat = String(n);
-    btn.textContent = '★';
-    btn.setAttribute('aria-label', n + ' stars');
-    btn.addEventListener('click', () => applyChange(() => { state.heat = n; }));
-    box.appendChild(btn);
-  }
-}
-
-function buildTray() {
-  const tray = $('photoTray');
-  tray.innerHTML = '';
-  state.photos.forEach((photo, i) => {
-    const img = document.createElement('img');
-    img.src = photo.src;
-    img.alt = photo.name;
-    img.title = photo.name;
-    img.addEventListener('click', () => {
-      applyChange(() => { currentSlots()[state.selected].photo = i; });
-    });
-    tray.appendChild(img);
-  });
-  syncUI();
-}
-
-async function addPhoto(name, src) {
-  const img = await loadImage(src);
-  commit();
-  state.photos.push({ name, src, img });
-  buildTray();
-  render();
-}
-
-// ---- pointer crop / zoom ---------------------------------------------------
-let dragging = false;
-let dragCommitted = false;
-let lastX = 0, lastY = 0;
-let lastWheelCommit = 0;
-
-function coverPoint(event) {
-  const rect = stage.getBoundingClientRect();
-  return {
-    x: ((event.clientX - rect.left) / rect.width) * stage.width,
-    y: ((event.clientY - rect.top) / rect.height) * stage.height,
-  };
-}
-
-stage.addEventListener('pointerdown', (event) => {
-  if (coverMode) return;
-  const { x, y } = coverPoint(event);
-  const hit = panelAt(state.layout, stage.width, stage.height, x, y);
-  if (hit < 0) return;
-  state.selected = hit;
-  dragging = true;
-  dragCommitted = false;
-  lastX = x;
-  lastY = y;
-  stage.classList.add('dragging');
-  stage.setPointerCapture(event.pointerId);
-  syncUI();
-  render();
-});
-
-stage.addEventListener('pointermove', (event) => {
-  if (!dragging) return;
-  const { x, y } = coverPoint(event);
-  const panels = LAYOUTS[state.layout].panels();
-  const panel = panels[state.selected];
-  const slot = currentSlots()[state.selected];
-  if (!panel || !slot) return;
-  if (!dragCommitted) {
-    commit();
-    dragCommitted = true;
-  }
-  slot.ox = Math.max(-0.6, Math.min(0.6, slot.ox + (x - lastX) / (panel.w * stage.width)));
-  slot.oy = Math.max(-0.6, Math.min(0.6, slot.oy + (y - lastY) / (panel.h * stage.height)));
-  lastX = x;
-  lastY = y;
-  render();
-});
-
-function endDrag() {
-  dragging = false;
-  stage.classList.remove('dragging');
-}
-
-stage.addEventListener('pointerup', endDrag);
-stage.addEventListener('pointercancel', endDrag);
-
-stage.addEventListener('wheel', (event) => {
-  if (coverMode) return;
-  event.preventDefault();
-  const slot = currentSlots()[state.selected];
-  if (!slot) return;
-  const now = Date.now();
-  if (now - lastWheelCommit > 500) {
-    commit();
-    lastWheelCommit = now;
-  }
-  slot.zoom = Math.max(1, Math.min(4, slot.zoom * Math.exp(-event.deltaY * 0.0012)));
-  render();
-}, { passive: false });
-
-// ---- export ----------------------------------------------------------------
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-}
-
-function exportSize(size) {
-  return new Promise((resolve) => {
-    const canvas = renderCoverCanvas(size.w, size.h, renderState());
-    canvas.toBlob((blob) => {
-      if (blob) downloadBlob(blob, `neon-coast-${size.id}.png`);
-      resolve(Boolean(blob));
-    }, 'image/png');
-  });
-}
-
-$('exportBtn').addEventListener('click', async () => {
-  await exportSize(currentSize());
-});
-
-$('exportAllBtn').addEventListener('click', async () => {
-  for (const size of EXPORT_SIZES) {
-    await exportSize(size);
-    await new Promise((r) => setTimeout(r, 300));
-  }
-});
-
-// ---- wire the control panel --------------------------------------------------
-$('layoutBtns').addEventListener('click', (event) => {
-  const btn = event.target.closest('button[data-layout]');
-  if (!btn) return;
-  applyChange(() => {
-    state.layout = btn.dataset.layout;
-    state.selected = 0;
-    currentSlots();
-  });
-});
-
-$('gradeBtns').addEventListener('click', (event) => {
-  const btn = event.target.closest('button[data-grade]');
-  if (!btn) return;
-  applyChange(() => { state.grade = btn.dataset.grade; });
-});
-
-$('grainChk').addEventListener('change', (event) => {
-  applyChange(() => { state.grain = event.target.checked; });
-});
-
-$('vignetteChk').addEventListener('change', (event) => {
-  applyChange(() => { state.vignette = event.target.checked; });
-});
-
-$('sizeBtns').addEventListener('click', (event) => {
-  const btn = event.target.closest('button[data-size]');
-  if (!btn) return;
-  state.size = btn.dataset.size;
-  syncUI();
-  render();
-});
-
-let captionSnapshot = null;
-for (const [input, key] of [[$('titleInput'), 'title'], [$('subInput'), 'sub'], [$('badgeInput'), 'badge']]) {
-  // The pre-edit snapshot is taken on the first keystroke of an editing
-  // session, before that keystroke mutates the state, so undo steps back to
-  // the caption as it was when the user started typing.
-  input.addEventListener('input', () => {
-    if (captionSnapshot === null) captionSnapshot = snapshot();
-    state[key] = input.value;
+  function restore(snap) {
+    state.layout = snap.layout;
+    state.grade = snap.grade;
+    state.grain = snap.grain;
+    state.vignette = snap.vignette;
+    state.title = snap.title;
+    state.subtitle = snap.subtitle;
+    state.badge = snap.badge;
+    state.stars = snap.stars;
+    state.exportSize = snap.exportSize;
+    state.panels = snap.panels;
+    syncControls();
     render();
-  });
-  input.addEventListener('change', () => {
-    if (captionSnapshot !== null) {
-      past.push(captionSnapshot);
-      if (past.length > 60) past.shift();
-      future.length = 0;
-      captionSnapshot = null;
-      syncUndoRedo();
-    }
-  });
-}
+  }
 
-$('fileInput').addEventListener('change', async (event) => {
-  for (const file of event.target.files) {
-    const src = await new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.readAsDataURL(file);
+  function pushHistory() {
+    undoStack.push(snapshot());
+    if (undoStack.length > 60) undoStack.shift();
+    redoStack.length = 0;
+    syncUndoButtons();
+  }
+
+  function undo() {
+    if (!undoStack.length) return;
+    redoStack.push(snapshot());
+    restore(undoStack.pop());
+    syncUndoButtons();
+  }
+
+  function redo() {
+    if (!redoStack.length) return;
+    undoStack.push(snapshot());
+    restore(redoStack.pop());
+    syncUndoButtons();
+  }
+
+  // ---------------------------------------------------------------- render
+
+  function sizeOf(label) {
+    var parts = label.split('x');
+    return { w: parseInt(parts[0], 10), h: parseInt(parts[1], 10) };
+  }
+
+  function render() {
+    if (!stage) return;
+    var size = sizeOf(state.exportSize);
+    if (stage.width !== size.w || stage.height !== size.h) {
+      stage.width = size.w;
+      stage.height = size.h;
+    }
+    window.CoverArt.drawCover(stage, state, images);
+  }
+
+  function renderOffscreen(label) {
+    var size = sizeOf(label);
+    return window.CoverArt.renderToSize(state, images, size.w, size.h);
+  }
+
+  // ---------------------------------------------------------------- export
+
+  function exportDataURL(label) {
+    return renderOffscreen(label).toDataURL('image/png');
+  }
+
+  function downloadPNG(label) {
+    var canvas = renderOffscreen(label);
+    canvas.toBlob(function (blob) {
+      if (!blob) return;
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'neon-coast-cover-' + label + '.png';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () {
+        URL.revokeObjectURL(a.href);
+        a.remove();
+      }, 400);
+    }, 'image/png');
+  }
+
+  function exportAll() {
+    EXPORT_SIZES.forEach(function (label, i) {
+      setTimeout(function () { downloadPNG(label); }, i * 350);
     });
-    await addPhoto(file.name, src);
   }
-  event.target.value = '';
-});
 
-$('samplePier').addEventListener('click', async () => {
-  if (!state.photos.some((p) => p.name === 'Pier')) await addPhoto('Pier', 'samples/pier.jpg');
-});
-$('sampleBlvd').addEventListener('click', async () => {
-  if (!state.photos.some((p) => p.name === 'Boulevard')) await addPhoto('Boulevard', 'samples/boulevard.jpg');
-});
+  // ---------------------------------------------------------------- controls
 
-$('undoBtn').addEventListener('click', undo);
-$('redoBtn').addEventListener('click', redo);
-document.addEventListener('keydown', (event) => {
-  const tag = (event.target.tagName || '').toUpperCase();
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.shiftKey) {
-    event.preventDefault();
-    undo();
-  } else if ((event.ctrlKey || event.metaKey) && (event.key.toLowerCase() === 'y' || (event.key.toLowerCase() === 'z' && event.shiftKey))) {
-    event.preventDefault();
-    redo();
+  function el(id) { return document.getElementById(id); }
+
+  function buildButtons(containerId, items, active, onPick) {
+    var box = el(containerId);
+    box.innerHTML = '';
+    items.forEach(function (item) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pick' + (item.id === active ? ' on' : '');
+      b.textContent = item.label;
+      if (item.swatch) b.style.background = item.swatch;
+      b.addEventListener('click', function () { onPick(item.id); });
+      box.appendChild(b);
+    });
   }
-});
 
-// ---- start: query params, samples, fonts --------------------------------------
-async function start() {
-  if (coverMode) document.body.classList.add('cover-shot');
-
-  const wantPhoto = params.get('photo');
-  const wantPhoto2 = params.get('photo2');
-  const first = wantPhoto
-    ? SAMPLES.find((s) => s.name.toLowerCase() === wantPhoto.toLowerCase()) || SAMPLES[1]
-    : SAMPLES[1];
-  const second = wantPhoto2
-    ? SAMPLES.find((s) => s.name.toLowerCase() === wantPhoto2.toLowerCase()) || SAMPLES[0]
-    : SAMPLES[0];
-  for (const sample of [first, second]) {
-    if (state.photos.some((p) => p.name === sample.name)) continue;
-    try {
-      state.photos.push({ name: sample.name, src: sample.src, img: await loadImage(sample.src) });
-    } catch {
-      // a missing sample leaves the tray empty for that slot; the app still runs
+  function buildStars() {
+    var box = el('stars');
+    box.innerHTML = '';
+    for (var i = 1; i <= 5; i++) {
+      (function (n) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'star' + (n <= state.stars ? ' lit' : '');
+        b.textContent = n <= state.stars ? '★' : '☆';
+        b.setAttribute('aria-label', n + ' stars');
+        b.addEventListener('click', function () {
+          pushHistory();
+          state.stars = n;
+          buildStars();
+          render();
+        });
+        box.appendChild(b);
+      })(i);
     }
   }
 
-  if (params.get('layout') && LAYOUTS[params.get('layout')]) state.layout = params.get('layout');
-  if (params.get('grade') && GRADES[params.get('grade')]) state.grade = params.get('grade');
-  if (params.get('caption')) state.title = params.get('caption');
-  if (params.get('sub')) state.sub = params.get('sub');
-  if (params.get('badge') !== null) state.badge = params.get('badge') || '';
-  if (params.get('heat')) state.heat = Math.max(0, Math.min(5, Number(params.get('heat')) || 0));
-  if (params.get('size') && EXPORT_SIZES.some((s) => s.id === params.get('size'))) state.size = params.get('size');
-  if (params.get('grain') === '0') state.grain = false;
-  if (params.get('vignette') === '0') state.vignette = false;
-
-  buildHeatStars();
-  buildTray();
-  syncUI();
-  syncUndoRedo();
-
-  try {
-    await Promise.all([
-      document.fonts.load('40px Anton'),
-      document.fonts.load('40px Pacifico'),
-      document.fonts.ready,
-    ]);
-  } catch {
-    // if a font fails to load, the canvas falls back to sans-serif and still draws
+  function buildTray() {
+    var box = el('tray');
+    box.innerHTML = '';
+    state.photos.forEach(function (photo, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'thumb';
+      var img = document.createElement('img');
+      img.src = photo.src;
+      img.alt = photo.name;
+      b.appendChild(img);
+      var label = document.createElement('span');
+      label.textContent = photo.name;
+      b.appendChild(label);
+      b.addEventListener('click', function () {
+        pushHistory();
+        state.panels[selected].photo = i;
+        render();
+      });
+      box.appendChild(b);
+    });
   }
-  render();
-  window.__ready = true;
-}
 
-window.__coverStudio = {
-  exportDataURL(w, h) {
-    const canvas = renderCoverCanvas(w, h, renderState());
-    return canvas.toDataURL('image/png');
-  },
-  get state() {
-    return { layout: state.layout, grade: state.grade, title: state.title, size: state.size };
-  },
-};
+  function syncControls() {
+    buildButtons('layout-picks', window.CoverArt.LAYOUT_ORDER.map(function (id) {
+      return { id: id, label: window.CoverArt.LAYOUTS[id].name };
+    }), state.layout, function (id) {
+      pushHistory();
+      state.layout = id;
+      selected = 0;
+      syncControls();
+      render();
+    });
+    buildButtons('grade-picks', window.CoverArt.GRADE_ORDER.map(function (id) {
+      var g = window.CoverArt.GRADES[id];
+      return { id: id, label: g.name, swatch: g.swatch };
+    }), state.grade, function (id) {
+      pushHistory();
+      state.grade = id;
+      syncControls();
+      render();
+    });
+    buildButtons('size-picks', EXPORT_SIZES.map(function (s) {
+      return { id: s, label: s.replace('x', ' × ') };
+    }), state.exportSize, function (id) {
+      pushHistory();
+      state.exportSize = id;
+      syncControls();
+      render();
+    });
+    el('title-input').value = state.title;
+    el('subtitle-input').value = state.subtitle;
+    el('badge-input').value = state.badge;
+    el('grain-check').checked = state.grain;
+    el('vignette-check').checked = state.vignette;
+    buildStars();
+    buildTray();
+    syncUndoButtons();
+  }
 
-const readyFallback = setTimeout(() => { window.__ready = true; }, 6000);
-start().finally(() => clearTimeout(readyFallback));
+  function syncUndoButtons() {
+    el('undo-btn').disabled = undoStack.length === 0;
+    el('redo-btn').disabled = redoStack.length === 0;
+  }
+
+  // ---------------------------------------------------------------- canvas input
+
+  function panelAt(clientX, clientY) {
+    var rect = stage.getBoundingClientRect();
+    var ux = (clientX - rect.left) / rect.width;
+    var uy = (clientY - rect.top) / rect.height;
+    var panels = window.CoverArt.LAYOUTS[state.layout].panels();
+    for (var i = panels.length - 1; i >= 0; i--) {
+      var p = panels[i];
+      if (p.poly) {
+        if (pointInPoly(ux, uy, p.poly)) return i;
+      } else if (ux >= p.x && ux <= p.x + p.w && uy >= p.y && uy <= p.y + p.h) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  function pointInPoly(x, y, poly) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+
+  function bindCanvas() {
+    stage.addEventListener('pointerdown', function (ev) {
+      var slot = panelAt(ev.clientX, ev.clientY);
+      if (slot < 0) return;
+      selected = slot;
+      pushHistory();
+      var rect = stage.getBoundingClientRect();
+      drag = {
+        slot: slot,
+        startX: ev.clientX,
+        startY: ev.clientY,
+        baseX: state.panels[slot].x,
+        baseY: state.panels[slot].y,
+        rectW: rect.width,
+        rectH: rect.height,
+      };
+      stage.setPointerCapture(ev.pointerId);
+      render();
+    });
+    stage.addEventListener('pointermove', function (ev) {
+      if (!drag) return;
+      var panels = window.CoverArt.LAYOUTS[state.layout].panels();
+      var p = panels[drag.slot];
+      var place = state.panels[drag.slot];
+      place.x = drag.baseX + (ev.clientX - drag.startX) / drag.rectW / Math.max(0.05, p.w);
+      place.y = drag.baseY + (ev.clientY - drag.startY) / drag.rectH / Math.max(0.05, p.h);
+      render();
+    });
+    stage.addEventListener('pointerup', function () { drag = null; });
+    stage.addEventListener('pointercancel', function () { drag = null; });
+    stage.addEventListener('wheel', function (ev) {
+      ev.preventDefault();
+      var slot = panelAt(ev.clientX, ev.clientY);
+      if (slot < 0) return;
+      if (!drag) pushHistory();
+      var place = state.panels[slot];
+      place.zoom = Math.max(1, Math.min(4, place.zoom * (ev.deltaY < 0 ? 1.12 : 0.89)));
+      render();
+    }, { passive: false });
+  }
+
+  function bindUpload() {
+    var input = el('upload-input');
+    el('upload-btn').addEventListener('click', function () { input.click(); });
+    input.addEventListener('change', function () {
+      var files = Array.prototype.slice.call(input.files || []);
+      if (!files.length) return;
+      var pending = files.map(function (file) {
+        return new Promise(function (resolve) {
+          var reader = new FileReader();
+          reader.onload = function () {
+            resolve({ id: 'up-' + Date.now() + '-' + Math.floor(Math.random() * 1e6), name: file.name.replace(/\.[^.]+$/, ''), src: reader.result });
+          };
+          reader.readAsDataURL(file);
+        });
+      });
+      Promise.all(pending).then(function (entries) {
+        pushHistory();
+        entries.forEach(function (entry) {
+          state.photos.push(entry);
+          state.panels[selected].photo = state.photos.length - 1;
+        });
+        loadAllPhotos().then(function () { buildTray(); render(); });
+      });
+      input.value = '';
+    });
+    el('fill-all-btn').addEventListener('click', function () {
+      pushHistory();
+      var photo = state.panels[selected].photo;
+      state.panels.forEach(function (place) { place.photo = photo; });
+      render();
+    });
+  }
+
+  // ---------------------------------------------------------------- shot mode
+
+  // ?shot=cover|editor&photo=pier&photo2=boulevard&layout=nine&grade=neon
+  // &caption=Neon%20Shore&sub=Night%20Drive&size=1920x1080
+  function applyParams() {
+    var q = new URLSearchParams(window.location.search);
+    var shot = q.get('shot') || 'editor';
+    var layout = q.get('layout');
+    var grade = q.get('grade');
+    if (layout && window.CoverArt.LAYOUTS[layout]) state.layout = layout;
+    if (grade && window.CoverArt.GRADES[grade]) state.grade = grade;
+    if (q.get('caption') !== null) state.title = q.get('caption');
+    if (q.get('sub') !== null) state.subtitle = q.get('sub');
+    if (q.get('size') && EXPORT_SIZES.indexOf(q.get('size')) >= 0) state.exportSize = q.get('size');
+    var first = q.get('photo');
+    var second = q.get('photo2');
+    var firstIdx = SAMPLES.findIndex(function (s) { return s.id === first; });
+    var secondIdx = SAMPLES.findIndex(function (s) { return s.id === second; });
+    if (firstIdx >= 0) {
+      state.panels.forEach(function (place, i) {
+        place.photo = (secondIdx >= 0 && i % 2 === 1) ? secondIdx : firstIdx;
+      });
+    }
+    if (shot === 'cover') {
+      document.body.classList.add('shot-cover');
+      var size = sizeOf(state.exportSize);
+      stage.width = size.w;
+      stage.height = size.h;
+      stage.style.width = '100vw';
+      stage.style.height = '100vh';
+    }
+    return shot;
+  }
+
+  // ---------------------------------------------------------------- boot
+
+  function boot() {
+    stage = el('stage');
+    var shot = applyParams();
+    syncControls();
+    bindCanvas();
+    bindUpload();
+    el('undo-btn').addEventListener('click', undo);
+    el('redo-btn').addEventListener('click', redo);
+    el('export-btn').addEventListener('click', function () { downloadPNG(state.exportSize); });
+    el('export-all-btn').addEventListener('click', exportAll);
+    el('title-input').addEventListener('input', function (ev) { state.title = ev.target.value; render(); });
+    el('title-input').addEventListener('change', function () { pushHistory(); });
+    el('subtitle-input').addEventListener('input', function (ev) { state.subtitle = ev.target.value; render(); });
+    el('subtitle-input').addEventListener('change', function () { pushHistory(); });
+    el('badge-input').addEventListener('input', function (ev) { state.badge = ev.target.value; render(); });
+    el('badge-input').addEventListener('change', function () { pushHistory(); });
+    el('grain-check').addEventListener('change', function (ev) { pushHistory(); state.grain = ev.target.checked; render(); });
+    el('vignette-check').addEventListener('change', function (ev) { pushHistory(); state.vignette = ev.target.checked; render(); });
+
+    window.__coverStudio = {
+      ready: false,
+      state: state,
+      render: render,
+      exportDataURL: exportDataURL,
+    };
+
+    var fontsReady = (document.fonts ? document.fonts.ready : Promise.resolve());
+    Promise.all([loadAllPhotos(), fontsReady]).then(function () {
+      render();
+      window.__coverStudio.ready = true;
+      document.title = 'ready';
+    }).catch(function (err) {
+      window.__coverStudio.error = String(err);
+      document.title = 'error';
+    });
+    if (shot === 'cover') render();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+})();

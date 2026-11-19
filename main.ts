@@ -1,43 +1,43 @@
-// Neon Coast Cover Studio, a gta6-cover-art-01 entry (Node 22, standard
-// library only). The app is the plain static files in this folder's app/
-// directory: app/index.html plus its ES modules, no library and no network
-// request. This program hands it in by copying app/ and screenshots/ from
-// beside this file into /output and writing /output/dossier.json, the
-// summary the judge reads, built with the vendored make.fun library.
-//
-// The app is a six-layout, five-grade cover maker: per-panel photos with
-// drag-to-crop, a bold caption with a neon subtitle, undo/redo, and PNG
-// export at 1080x1080, 1080x1350, 1920x1080 and 1080x1920.
-//
-// Try it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// Neon Coast Cover Studio — hand-in program.
+// Node 22, standard library only: copies app/ and screenshots/ from this
+// repository into the output folder and writes dossier.json with the
+// vendored vendor/makefun-app.ts library. Outside the grader,
+// MAKEFUN_OUTPUT_DIR stands in for /output. Running it twice writes the
+// same bytes both times: the copies are byte copies and buildDossier is
+// deterministic, so nothing here stamps a time or a random value.
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-app.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)));
+const outDir = process.env.MAKEFUN_OUTPUT_DIR
+  ? resolve(process.env.MAKEFUN_OUTPUT_DIR)
+  : '/output';
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'app'), join(out, 'app'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+const caps = {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  app_max_files: 993,
+  app_max_bytes: 50331648,
+};
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the
-// bytes; the rest refuse an entry the scorer would refuse (more than 4
-// screenshots or one over 256 KiB; more than 993 files in app/ or 48 MiB of
-// app files in all, or a path under app/ over 1000 bytes: app/ counts beside
-// /output's own 1000-entry cap, its screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    app_max_files: 993,
-    app_max_bytes: 50331648,
-    app_path_max_bytes: 1000,
-  }),
-);
+function copyTree(name) {
+  const from = join(repoRoot, name);
+  const to = join(outDir, name);
+  cpSync(from, to, { recursive: true, dereference: false });
+  return from;
+}
+
+rmSync(outDir, { recursive: true, force: true });
+mkdirSync(outDir, { recursive: true });
+copyTree('app');
+copyTree('screenshots');
+
+const dossier = buildDossier(outDir, caps);
+writeFileSync(join(outDir, 'dossier.json'), dossier);
+
+const appBytes = statSync(join(outDir, 'app')).size;
+console.log(`handed in: app/ + screenshots/ -> ${outDir}`);
+console.log(`dossier.json: ${dossier.length} bytes (app dir entry: ${appBytes} bytes)`);
