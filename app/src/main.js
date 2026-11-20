@@ -1,4 +1,4 @@
-// Neon Coast Cover Studio — editor (round 4 build).
+// Neon Coast Cover Studio — editor (round 5 build).
 // State, history, controls, photo handling, export and screenshot presets.
 // Uses the rendering engine in src/cover.js (window.NeonCoast).
 (function () {
@@ -10,7 +10,8 @@
     { id: 'blvd', src: 'samples/boulevard.jpg', name: 'Boulevard' },
   ];
 
-  function defaultAssign() {
+  // Nine slots (the biggest layout), alternating the two samples.
+  function freshAssign() {
     var out = [];
     for (var i = 0; i < 9; i++) {
       out.push({ photo: i % 2 === 0 ? 'blvd' : 'pier', dx: 0, dy: 0, zoom: 1 });
@@ -18,25 +19,32 @@
     return out;
   }
 
-  function defaultState() {
+  function freshState() {
     return {
-      layout: 'hero', grade: 'golden', grain: true, vignette: true,
-      title: 'BOULEVARD QUEEN', subtitle: 'Night Drive', stars: 4, ribbon: true,
+      layout: 'hero',
+      grade: 'golden',
+      grain: true,
+      vignette: true,
+      title: 'BOULEVARD QUEEN',
+      subtitle: 'Night Drive',
+      stars: 4,
+      ribbon: true,
       size: '1080x1080',
       photos: SAMPLE_PHOTOS.slice(),
-      assign: defaultAssign(),
+      assign: freshAssign(),
       selected: 0,
     };
   }
 
-  var state = defaultState();
+  var state = freshState();
   var images = new Map(); // photo id -> HTMLImageElement
-  var history = [];
-  var future = [];
+  var undoStack = [];
+  var redoStack = [];
   var uploadCount = 0;
   var wheelSnap = null;
   var wheelTimer = null;
 
+  // Grab every control once, up front.
   var stage = document.getElementById('coverStage');
   var layoutRow = document.getElementById('layoutRow');
   var gradeRow = document.getElementById('gradeRow');
@@ -60,34 +68,41 @@
     if (images.has(photo.id)) return Promise.resolve(images.get(photo.id));
     return new Promise(function (resolve, reject) {
       var img = new Image();
-      img.onload = function () { images.set(photo.id, img); resolve(img); };
+      img.onload = function () {
+        images.set(photo.id, img);
+        resolve(img);
+      };
       img.onerror = function () { reject(new Error('could not load ' + photo.src)); };
       img.src = photo.src;
     });
   }
 
   function snapshot() { return JSON.stringify(state); }
+
   function pushHistory() {
-    history.push(snapshot());
-    if (history.length > 60) history.shift();
-    future.length = 0;
-    updateUndoButtons();
+    undoStack.push(snapshot());
+    if (undoStack.length > 60) undoStack.shift();
+    redoStack.length = 0;
+    syncUndoButtons();
   }
+
   function undo() {
-    if (!history.length) return;
-    future.push(snapshot());
-    state = JSON.parse(history.pop());
+    if (!undoStack.length) return;
+    redoStack.push(snapshot());
+    state = JSON.parse(undoStack.pop());
     render();
   }
+
   function redo() {
-    if (!future.length) return;
-    history.push(snapshot());
-    state = JSON.parse(future.pop());
+    if (!redoStack.length) return;
+    undoStack.push(snapshot());
+    state = JSON.parse(redoStack.pop());
     render();
   }
-  function updateUndoButtons() {
-    undoBtn.disabled = history.length === 0;
-    redoBtn.disabled = future.length === 0;
+
+  function syncUndoButtons() {
+    undoBtn.disabled = undoStack.length === 0;
+    redoBtn.disabled = redoStack.length === 0;
   }
 
   // The drag/zoom slot for a panel: its pixel size plus the offset of the
@@ -104,6 +119,8 @@
     return { w: rect.w, h: rect.h, ox: 0, oy: 0 };
   }
 
+  // Selecting a different panel is cheap: just move the highlight, no
+  // full re-render.
   function renderSelectionOnly() {
     var slots = stage.querySelectorAll('.slot');
     for (var i = 0; i < slots.length; i++) {
@@ -148,6 +165,7 @@
     markActive(layoutRow, 'layout', state.layout);
     markActive(gradeRow, 'grade', state.grade);
     markActive(sizeRow, 'size', state.size);
+    // Don't clobber the field the user is typing in.
     if (document.activeElement !== titleInput) titleInput.value = state.title;
     if (document.activeElement !== subtitleInput) subtitleInput.value = state.subtitle;
     if (document.activeElement !== starsInput) starsInput.value = String(state.stars);
@@ -156,7 +174,7 @@
     ribbonChk.checked = state.ribbon;
     starsLabel.textContent = NC.starString(state.stars);
     renderThumbs();
-    updateUndoButtons();
+    syncUndoButtons();
   }
 
   function buildControls() {
@@ -216,10 +234,10 @@
     });
     input.addEventListener('change', function () {
       if (snap !== null && snap !== snapshot()) {
-        history.push(snap);
-        if (history.length > 60) history.shift();
-        future.length = 0;
-        updateUndoButtons();
+        undoStack.push(snap);
+        if (undoStack.length > 60) undoStack.shift();
+        redoStack.length = 0;
+        syncUndoButtons();
       }
       snap = null;
     });
@@ -300,9 +318,11 @@
       var imgEl = slotEl.querySelector('img');
       var img = images.get(state.assign[idx].photo);
       if (!img || !imgEl) return;
-      var coverW = stage.clientWidth, coverH = stage.clientHeight;
+      var coverW = stage.clientWidth;
+      var coverH = stage.clientHeight;
       var slot = slotSizeFor(idx, coverW, coverH);
-      var startX = e.clientX, startY = e.clientY;
+      var startX = e.clientX;
+      var startY = e.clientY;
       var startCrop = { dx: state.assign[idx].dx, dy: state.assign[idx].dy, zoom: state.assign[idx].zoom };
       var moved = false;
       function onMove(ev) {
@@ -317,10 +337,10 @@
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
         if (moved) {
-          history.push(before);
-          if (history.length > 60) history.shift();
-          future.length = 0;
-          updateUndoButtons();
+          undoStack.push(before);
+          if (undoStack.length > 60) undoStack.shift();
+          redoStack.length = 0;
+          syncUndoButtons();
         }
         render();
       }
@@ -346,10 +366,10 @@
       clearTimeout(wheelTimer);
       wheelTimer = setTimeout(function () {
         if (wheelSnap !== null) {
-          history.push(wheelSnap);
-          if (history.length > 60) history.shift();
-          future.length = 0;
-          updateUndoButtons();
+          undoStack.push(wheelSnap);
+          if (undoStack.length > 60) undoStack.shift();
+          redoStack.length = 0;
+          syncUndoButtons();
           wheelSnap = null;
         }
         render();
@@ -423,8 +443,9 @@
   function renderShotCanvas() {
     var dims = SHOT_DIMS[shot];
     if (!dims) return Promise.resolve();
-    // renderToCanvas is synchronous (it returns the canvas); the old code
-    // treated it as a promise, which threw and never set __shotReady.
+    // renderToCanvas is synchronous (it returns the canvas), so call it
+    // directly — awaiting it as a promise would throw and never set
+    // __shotReady.
     var canvas = NC.renderToCanvas(state, images, dims[0], dims[1]);
     stage.innerHTML = '';
     stage.style.aspectRatio = dims[0] + ' / ' + dims[1];

@@ -1,9 +1,9 @@
-// Neon Coast Cover Studio — entrypoint for make.fun (round 4 build).
-// Copies app/ and screenshots/ into the output directory and writes
+// Neon Coast Cover Studio — entrypoint for make.fun (round 5 build).
+// Copies app/ and screenshots/ into the output directory, then writes
 // dossier.json from them with the kit's buildDossier, so the handed-in
 // entry is exactly what the scorer reads. Runs with plain `node main.ts`
 // (erasable TypeScript, Node 22+): no flags, no build, no install.
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-app.ts';
@@ -17,7 +17,11 @@ const shotsDir = join(repoRoot, 'screenshots');
 if (!existsSync(appDir)) throw new Error('app/ is missing in ' + repoRoot);
 if (!existsSync(shotsDir)) throw new Error('screenshots/ is missing in ' + repoRoot);
 
-rmSync(outDir, { recursive: true, force: true });
+// NOTE: never delete outDir here. In the grader /output is a bind mount,
+// and removing the mount point itself fails (EBUSY/EACCES — force only
+// skips ENOENT). Round 4 died exactly on that rmSync. The grader always
+// hands us an empty output dir, so just making sure it exists is enough —
+// cpSync then fills it, and the dossier is written on top.
 mkdirSync(outDir, { recursive: true });
 cpSync(appDir, join(outDir, 'app'), { recursive: true });
 cpSync(shotsDir, join(outDir, 'screenshots'), { recursive: true });
@@ -30,6 +34,7 @@ const dossier = buildDossier(outDir, {
 });
 const dossierPath = join(outDir, 'dossier.json');
 writeFileSync(dossierPath, dossier);
+
 // Read it back and check it parses, so a bad dossier fails loudly here
 // instead of being handed in silently.
 const check = JSON.parse(readFileSync(dossierPath, 'utf8'));

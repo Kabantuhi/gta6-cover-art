@@ -1,10 +1,11 @@
-// Neon Coast Cover Studio — cover rendering engine (round 4 build).
-// Layout math, DOM cover builder and canvas exporter. No network access:
+// Neon Coast Cover Studio — cover rendering engine (round 5 build).
+// Layout math, DOM cover builder and canvas exporter. Fully offline:
 // fonts and photos are local files served with the app.
 (function () {
   'use strict';
 
-  var GAP = 0.012; // gap between panels, as a fraction of cover width
+  // Gap between panels, as a fraction of the cover width.
+  var PANEL_GAP = 0.012;
 
   var LAYOUTS = [
     { id: 'four', name: 'Four-panel grid', slots: 4 },
@@ -30,29 +31,32 @@
     { id: '1080x1920', label: '1080 × 1920', w: 1080, h: 1920 },
   ];
 
-  function byId(list, id) {
-    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+  function findIn(list, id) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return list[i];
+    }
     return list[0];
   }
-  function gradeById(id) { return byId(GRADES, id); }
-  function layoutById(id) { return byId(LAYOUTS, id); }
-  function sizeById(id) { return byId(SIZES, id); }
+  function gradeById(id) { return findIn(GRADES, id); }
+  function layoutById(id) { return findIn(LAYOUTS, id); }
+  function sizeById(id) { return findIn(SIZES, id); }
 
-  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
   function starString(n) {
-    var s = '';
-    for (var i = 0; i < 5; i++) s += i < n ? '★' : '☆';
-    return s;
+    var out = '';
+    for (var i = 0; i < 5; i++) out += i < n ? '★' : '☆';
+    return out;
   }
 
   // Panel rects for a layout, in pixels, inside a cover of w x h.
-  // A rect is {x, y, w, h} plus, for tilt, {rot, frame}; for duo, {poly}.
+  // A rect is {x, y, w, h}; tilt adds {rot, frame}, duo adds {poly}.
   function layoutRects(layoutId, w, h) {
-    var g = Math.round(w * GAP);
+    var g = Math.round(w * PANEL_GAP);
     var rects = [];
     if (layoutId === 'four') {
-      var cw = (w - g) / 2, ch = (h - g) / 2;
+      var cw = (w - g) / 2;
+      var ch = (h - g) / 2;
       rects = [
         { x: 0, y: 0, w: cw, h: ch },
         { x: cw + g, y: 0, w: cw, h: ch },
@@ -60,23 +64,28 @@
         { x: cw + g, y: ch + g, w: cw, h: ch },
       ];
     } else if (layoutId === 'hero') {
-      var lw = Math.round(w * 0.62), rw = w - lw - g;
-      var rh = (h - 2 * g) / 3;
+      var leftW = Math.round(w * 0.62);
+      var rightW = w - leftW - g;
+      var rowH = (h - 2 * g) / 3;
       rects = [
-        { x: 0, y: 0, w: lw, h: h },
-        { x: lw + g, y: 0, w: rw, h: rh },
-        { x: lw + g, y: rh + g, w: rw, h: rh },
-        { x: lw + g, y: 2 * (rh + g), w: rw, h: rh },
+        { x: 0, y: 0, w: leftW, h: h },
+        { x: leftW + g, y: 0, w: rightW, h: rowH },
+        { x: leftW + g, y: rowH + g, w: rightW, h: rowH },
+        { x: leftW + g, y: 2 * (rowH + g), w: rightW, h: rowH },
       ];
     } else if (layoutId === 'bleed') {
       rects = [{ x: 0, y: 0, w: w, h: h }];
     } else if (layoutId === 'nine') {
-      var cw3 = (w - 2 * g) / 3, ch3 = (h - 2 * g) / 3;
-      var xs = [0, cw3 + g, 2 * (cw3 + g)], ys = [0, ch3 + g, 2 * (ch3 + g)];
-      var order = [0, 1, 2, 3, 5, 6, 7, 8]; // every cell except the centre
-      order.forEach(function (cell) {
-        var cx = cell % 3, cy = Math.floor(cell / 3);
-        rects.push({ x: xs[cx], y: ys[cy], w: cw3, h: ch3 });
+      var cellW = (w - 2 * g) / 3;
+      var cellH = (h - 2 * g) / 3;
+      var xs = [0, cellW + g, 2 * (cellW + g)];
+      var ys = [0, cellH + g, 2 * (cellH + g)];
+      // Every cell except the centre — the centre holds the title block.
+      var cells = [0, 1, 2, 3, 5, 6, 7, 8];
+      cells.forEach(function (cell) {
+        var cx = cell % 3;
+        var cy = Math.floor(cell / 3);
+        rects.push({ x: xs[cx], y: ys[cy], w: cellW, h: cellH });
       });
     } else if (layoutId === 'tilt') {
       rects = [
@@ -101,13 +110,15 @@
 
   // Inner photo area of a tilted polaroid frame, relative to the frame.
   function tiltInner(rect) {
-    var padX = rect.w * 0.05, padTop = rect.h * 0.05, padBottom = rect.h * 0.16;
+    var padX = rect.w * 0.05;
+    var padTop = rect.h * 0.05;
+    var padBottom = rect.h * 0.16;
     return { x: padX, y: padTop, w: rect.w - 2 * padX, h: rect.h - padTop - padBottom };
   }
 
   // Where an image lands inside a slot, given a crop {dx, dy, zoom}.
-  // dx/dy are fractions of the slot size, zoom is >= 1. Returns offsets and
-  // size relative to the slot's top-left corner.
+  // dx/dy are fractions of the slot size, zoom is >= 1. Returns offsets
+  // and size relative to the slot's top-left corner.
   function cropBox(slot, img, crop) {
     var iw = img.naturalWidth || img.width;
     var ih = img.naturalHeight || img.height;
@@ -117,7 +128,8 @@
     return {
       x: (slot.w - dw) / 2 + (crop.dx || 0) * slot.w,
       y: (slot.h - dh) / 2 + (crop.dy || 0) * slot.h,
-      w: dw, h: dh,
+      w: dw,
+      h: dh,
     };
   }
 
@@ -125,10 +137,10 @@
   function clampCrop(slot, img, crop) {
     crop.zoom = clamp(crop.zoom || 1, 1, 3);
     var box = cropBox(slot, img, crop);
-    var mx = box.w > slot.w ? (box.w - slot.w) / (2 * slot.w) : 0;
-    var my = box.h > slot.h ? (box.h - slot.h) / (2 * slot.h) : 0;
-    crop.dx = clamp(crop.dx || 0, -mx, mx);
-    crop.dy = clamp(crop.dy || 0, -my, my);
+    var maxX = box.w > slot.w ? (box.w - slot.w) / (2 * slot.w) : 0;
+    var maxY = box.h > slot.h ? (box.h - slot.h) / (2 * slot.h) : 0;
+    crop.dx = clamp(crop.dx || 0, -maxX, maxX);
+    crop.dy = clamp(crop.dy || 0, -maxY, maxY);
     return crop;
   }
 
@@ -143,33 +155,36 @@
   }
 
   // One shared film-grain tile, drawn once and reused by DOM and canvas.
-  var _noiseCanvas = null;
+  var cachedNoise = null;
   function noiseCanvas() {
-    if (_noiseCanvas) return _noiseCanvas;
+    if (cachedNoise) return cachedNoise;
     var c = document.createElement('canvas');
-    c.width = 128; c.height = 128;
+    c.width = 128;
+    c.height = 128;
     var x = c.getContext('2d');
     var d = x.createImageData(128, 128);
     for (var i = 0; i < d.data.length; i += 4) {
       var v = (Math.random() * 255) | 0;
-      d.data[i] = v; d.data[i + 1] = v; d.data[i + 2] = v;
+      d.data[i] = v;
+      d.data[i + 1] = v;
+      d.data[i + 2] = v;
       d.data[i + 3] = (Math.random() * 26) | 0;
     }
     x.putImageData(d, 0, 0);
-    _noiseCanvas = c;
+    cachedNoise = c;
     return c;
   }
   function noiseURL() { return noiseCanvas().toDataURL('image/png'); }
 
   // Largest Anton size that fits `text` inside maxWidth, shrinking from
   // startPx. Uses an offscreen canvas so DOM and export agree.
-  var _measure = null;
+  var measureCtx = null;
   function fitTitleSize(text, startPx, maxWidth) {
-    if (!_measure) _measure = document.createElement('canvas').getContext('2d');
+    if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
     var size = startPx;
     while (size > 10) {
-      _measure.font = size + 'px Anton, sans-serif';
-      if (_measure.measureText(text).width <= maxWidth) break;
+      measureCtx.font = size + 'px Anton, sans-serif';
+      if (measureCtx.measureText(text).width <= maxWidth) break;
       size -= 2;
     }
     return size;
@@ -188,17 +203,19 @@
     var grade = gradeById(state.grade);
     var rects = layoutRects(state.layout, w, h);
 
+    // Tilted layout: the first photo also fills the background, dimmed.
     if (state.layout === 'tilt') {
-      var bg = images.get(state.assign[0] ? state.assign[0].photo : null);
+      var first = state.assign[0] ? state.assign[0].photo : null;
+      var bg = images.get(first);
       if (bg) {
-        var bgEl = document.createElement('div');
-        bgEl.className = 'cover-bg';
+        var bgWrap = document.createElement('div');
+        bgWrap.className = 'cover-bg';
         var bgImg = document.createElement('img');
         bgImg.src = bg.src;
         bgImg.style.filter = grade.filter;
         positionSlotImg(bgImg, { w: w, h: h }, bg, { dx: 0, dy: 0, zoom: 1.15 });
-        bgEl.appendChild(bgImg);
-        cover.appendChild(bgEl);
+        bgWrap.appendChild(bgImg);
+        cover.appendChild(bgWrap);
       }
     }
 
@@ -206,6 +223,7 @@
       var assign = state.assign[i] || { photo: null, dx: 0, dy: 0, zoom: 1 };
       var img = images.get(assign.photo);
       if (!img) return;
+
       if (rect.frame) {
         var frame = document.createElement('div');
         frame.className = 'slot frame';
@@ -216,15 +234,16 @@
         frame.style.height = px(rect.h);
         frame.style.transform = 'rotate(' + rect.rot + 'deg)';
         var inner = tiltInner(rect);
-        var photo = document.createElement('img');
-        photo.src = img.src;
-        photo.style.filter = grade.filter;
-        positionSlotImg(photo, inner, img, assign, inner.x, inner.y);
-        frame.appendChild(photo);
+        var framePhoto = document.createElement('img');
+        framePhoto.src = img.src;
+        framePhoto.style.filter = grade.filter;
+        positionSlotImg(framePhoto, inner, img, assign, inner.x, inner.y);
+        frame.appendChild(framePhoto);
         if (selected === i) frame.classList.add('selected');
         cover.appendChild(frame);
         return;
       }
+
       var slot = document.createElement('div');
       slot.className = 'slot';
       slot.dataset.slot = String(i);
@@ -257,7 +276,10 @@
 
     // Title block.
     var zone = titleZone(state.layout);
-    var zx = zone.x * w, zy = zone.y * h, zw = zone.w * w, zh = zone.h * h;
+    var zx = zone.x * w;
+    var zy = zone.y * h;
+    var zw = zone.w * w;
+    var zh = zone.h * h;
     var titleEl = document.createElement('div');
     titleEl.className = 'cover-title ' + (state.layout === 'nine' ? 'cell' : 'band');
     titleEl.style.left = px(zx);
@@ -323,7 +345,8 @@
   // Draw the cover onto a canvas at exact export size.
   function renderToCanvas(state, images, w, h) {
     var canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
+    canvas.width = w;
+    canvas.height = h;
     var ctx = canvas.getContext('2d');
     ctx.fillStyle = '#150a2e';
     ctx.fillRect(0, 0, w, h);
@@ -331,7 +354,8 @@
     var rects = layoutRects(state.layout, w, h);
 
     if (state.layout === 'tilt') {
-      var bg = images.get(state.assign[0] ? state.assign[0].photo : null);
+      var first = state.assign[0] ? state.assign[0].photo : null;
+      var bg = images.get(first);
       if (bg) {
         ctx.save();
         ctx.filter = grade.filter;
@@ -347,8 +371,10 @@
       var img = images.get(assign.photo);
       if (!img) return;
       ctx.save();
+
       if (rect.frame) {
-        var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+        var cx = rect.x + rect.w / 2;
+        var cy = rect.y + rect.h / 2;
         ctx.translate(cx, cy);
         ctx.rotate(rect.rot * Math.PI / 180);
         ctx.fillStyle = '#fdf8ef';
@@ -358,30 +384,33 @@
         ctx.rect(-rect.w / 2 + inner.x, -rect.h / 2 + inner.y, inner.w, inner.h);
         ctx.clip();
         ctx.filter = grade.filter;
-        var box = cropBox(inner, img, assign);
-        ctx.drawImage(img, -rect.w / 2 + inner.x + box.x, -rect.h / 2 + inner.y + box.y, box.w, box.h);
+        var fbox = cropBox(inner, img, assign);
+        ctx.drawImage(img, -rect.w / 2 + inner.x + fbox.x, -rect.h / 2 + inner.y + fbox.y, fbox.w, fbox.h);
         ctx.restore();
         return;
       }
+
       if (rect.poly) {
         ctx.beginPath();
         rect.poly.forEach(function (p, k) {
-          if (k === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]);
+          if (k === 0) ctx.moveTo(p[0], p[1]);
+          else ctx.lineTo(p[0], p[1]);
         });
         ctx.closePath();
         ctx.clip();
         ctx.filter = grade.filter;
-        var boxP = cropBox({ w: w, h: h }, img, assign);
-        ctx.drawImage(img, boxP.x, boxP.y, boxP.w, boxP.h);
+        var pbox = cropBox({ w: w, h: h }, img, assign);
+        ctx.drawImage(img, pbox.x, pbox.y, pbox.w, pbox.h);
         ctx.restore();
         return;
       }
+
       ctx.beginPath();
       ctx.rect(rect.x, rect.y, rect.w, rect.h);
       ctx.clip();
       ctx.filter = grade.filter;
-      var box2 = cropBox(rect, img, assign);
-      ctx.drawImage(img, rect.x + box2.x, rect.y + box2.y, box2.w, box2.h);
+      var rbox = cropBox(rect, img, assign);
+      ctx.drawImage(img, rect.x + rbox.x, rect.y + rbox.y, rbox.w, rbox.h);
       ctx.restore();
     });
 
@@ -407,7 +436,10 @@
 
     // Title block.
     var zone = titleZone(state.layout);
-    var zx = zone.x * w, zy = zone.y * h, zw = zone.w * w, zh = zone.h * h;
+    var zx = zone.x * w;
+    var zy = zone.y * h;
+    var zw = zone.w * w;
+    var zh = zone.h * h;
     if (state.layout === 'nine') {
       ctx.fillStyle = '#150a2e';
       ctx.fillRect(zx, zy, zw, zh);
@@ -445,7 +477,8 @@
     // Ribbon across the top-right corner, centred a little inside it so
     // the band and its text stay visible.
     if (state.ribbon) {
-      var bw = w * 0.42, bh = Math.max(20, w * 0.045);
+      var bw = w * 0.42;
+      var bh = Math.max(20, w * 0.045);
       var bs = bw * 0.18;
       ctx.save();
       ctx.translate(w - bs, bs);

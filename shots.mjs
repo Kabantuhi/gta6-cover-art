@@ -1,4 +1,4 @@
-// Neon Coast Cover Studio — screenshot driver (round 4 build).
+// Neon Coast Cover Studio — screenshot driver (round 5 build).
 // Serves the app with serve.ts, drives headless Chrome over CDP with
 // Node's built-in WebSocket, and captures the four shots from shots.json.
 // No third-party packages: node:child_process, node:fs, node:path only.
@@ -17,16 +17,16 @@ const PORT = 8901;
 const DEBUG_PORT = 9333;
 
 function sleep(ms) {
-  return new Promise(function (r) { setTimeout(r, ms); });
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
 async function waitFor(url, timeoutMs) {
-  var end = Date.now() + (timeoutMs || 20000);
-  while (Date.now() < end) {
+  var deadline = Date.now() + (timeoutMs || 20000);
+  while (Date.now() < deadline) {
     try {
       var r = await fetch(url);
       if (r.ok) return true;
-    } catch (e) { /* not up yet */ }
+    } catch (e) { /* server not up yet */ }
     await sleep(250);
   }
   throw new Error('timed out waiting for ' + url);
@@ -35,29 +35,28 @@ async function waitFor(url, timeoutMs) {
 // Minimal CDP client over Node's built-in WebSocket.
 function CDP(wsUrl) {
   this.ws = new WebSocket(wsUrl);
-  this.id = 0;
+  this.nextId = 0;
   this.pending = new Map();
   var self = this;
   this.ws.onmessage = function (ev) {
     var msg = JSON.parse(ev.data);
-    if (msg.id && self.pending.has(msg.id)) {
-      var p = self.pending.get(msg.id);
-      self.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
-      else p.resolve(msg.result);
-    }
+    if (!msg.id || !self.pending.has(msg.id)) return;
+    var p = self.pending.get(msg.id);
+    self.pending.delete(msg.id);
+    if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
+    else p.resolve(msg.result);
   };
 }
 CDP.prototype.ready = function () {
   var self = this;
-  return new Promise(function (res, rej) {
-    self.ws.onopen = res;
-    self.ws.onerror = rej;
+  return new Promise(function (resolve, reject) {
+    self.ws.onopen = resolve;
+    self.ws.onerror = reject;
   });
 };
 CDP.prototype.send = function (method, params) {
   var self = this;
-  var id = ++self.id;
+  var id = ++self.nextId;
   return new Promise(function (resolve, reject) {
     self.pending.set(id, { resolve: resolve, reject: reject });
     self.ws.send(JSON.stringify({ id: id, method: method, params: params || {} }));
@@ -70,7 +69,7 @@ CDP.prototype.eval = async function (expression) {
 };
 CDP.prototype.close = function () { this.ws.close(); };
 
-async function newTarget(url) {
+async function openTarget(url) {
   var endpoint = 'http://127.0.0.1:' + DEBUG_PORT + '/json/new?' + url;
   var r = await fetch(endpoint, { method: 'PUT' });
   if (!r.ok) r = await fetch(endpoint);
@@ -79,10 +78,13 @@ async function newTarget(url) {
   return t;
 }
 
-async function main() {
+async function captureAll() {
   var server = spawn(process.execPath, ['serve.ts', '--port', String(PORT)], { cwd: repo, stdio: 'ignore' });
   var chrome = spawn(CHROME, [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--hide-scrollbars',
+    '--headless=new',
+    '--no-sandbox',
+    '--disable-gpu',
+    '--hide-scrollbars',
     '--remote-debugging-port=' + DEBUG_PORT,
     '--user-data-dir=/tmp/neon-coast-shots-profile',
     'about:blank',
@@ -92,16 +94,19 @@ async function main() {
     await waitFor('http://127.0.0.1:' + DEBUG_PORT + '/json/version');
     for (var i = 0; i < shots.length; i++) {
       var shot = shots[i];
-      var target = await newTarget('http://127.0.0.1:' + PORT + shot.url);
+      var target = await openTarget('http://127.0.0.1:' + PORT + shot.url);
       var cdp = new CDP(target.webSocketDebuggerUrl);
       await cdp.ready();
       await cdp.send('Page.enable');
       await cdp.send('Emulation.setDeviceMetricsOverride', {
-        width: shot.width, height: shot.height, deviceScaleFactor: 1, mobile: false,
+        width: shot.width,
+        height: shot.height,
+        deviceScaleFactor: 1,
+        mobile: false,
       });
-      var end = Date.now() + 30000;
+      var deadline = Date.now() + 30000;
       var ready = false;
-      while (Date.now() < end) {
+      while (Date.now() < deadline) {
         try { ready = await cdp.eval('window.__shotReady === true'); } catch (e) { /* keep waiting */ }
         if (ready) break;
         await sleep(300);
@@ -119,7 +124,7 @@ async function main() {
   }
 }
 
-main().catch(function (e) {
+captureAll().catch(function (e) {
   console.error(e);
   process.exit(1);
 });
