@@ -1,45 +1,38 @@
-// Neon Coast Cover Studio — entrypoint for make.fun (round 5 build).
-// Copies app/ and screenshots/ into the output directory, then writes
-// dossier.json from them with the kit's buildDossier, so the handed-in
-// entry is exactly what the scorer reads. Runs with plain `node main.ts`
-// (erasable TypeScript, Node 22+): no flags, no build, no install.
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Neon Coast Cover Studio — make.fun entry builder (Node 22, stdlib only).
+//
+// What it does, in order:
+//   1. Copies the whole offline app (app/) into the output directory.
+//   2. Copies the four screenshots into output/screenshots/.
+//   3. Builds the entry dossier from the output tree and writes dossier.json.
+//
+// The grader runs this with the repo mounted read-only and /output as a
+// bind mount, so it must never delete or rewrite anything in place:
+// only mkdirSync (recursive) and cpSync are used — nothing that removes files.
+
+import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { buildDossier } from './vendor/makefun-app.ts';
 
-const repoRoot = resolve(fileURLToPath(new URL('.', import.meta.url)));
-const wanted = process.env.MAKEFUN_OUTPUT_DIR ?? 'out';
-const outDir = resolve(repoRoot, wanted);
-const appDir = join(repoRoot, 'app');
-const shotsDir = join(repoRoot, 'screenshots');
+const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-if (!existsSync(appDir)) throw new Error('app/ is missing in ' + repoRoot);
-if (!existsSync(shotsDir)) throw new Error('screenshots/ is missing in ' + repoRoot);
+// The app itself: every static file under app/ (page, scripts, styles,
+// fonts, sample photos) goes to the output verbatim.
+mkdirSync(join(out, 'app'), { recursive: true });
+cpSync('app', join(out, 'app'), { recursive: true });
 
-// NOTE: never delete outDir here. In the grader /output is a bind mount,
-// and removing the mount point itself fails (EBUSY/EACCES — force only
-// skips ENOENT). Round 4 died exactly on that rmSync. The grader always
-// hands us an empty output dir, so just making sure it exists is enough —
-// cpSync then fills it, and the dossier is written on top.
-mkdirSync(outDir, { recursive: true });
-cpSync(appDir, join(outDir, 'app'), { recursive: true });
-cpSync(shotsDir, join(outDir, 'screenshots'), { recursive: true });
+// The screenshots: the first by name is the cover.
+mkdirSync(join(out, 'screenshots'), { recursive: true });
+cpSync('screenshots', join(out, 'screenshots'), { recursive: true });
 
-const dossier = buildDossier(outDir, {
+// The dossier: the scorer rebuilds this exact file from the output tree,
+// so these caps must match the bounty's gate.
+const dossier = buildDossier(out, {
   text_max_bytes: 163840,
   screenshots: { max: 4, max_bytes: 262144 },
   app_max_files: 993,
   app_max_bytes: 50331648,
+  app_path_max_bytes: 1000,
 });
-const dossierPath = join(outDir, 'dossier.json');
-writeFileSync(dossierPath, dossier);
+writeFileSync(join(out, 'dossier.json'), dossier);
 
-// Read it back and check it parses, so a bad dossier fails loudly here
-// instead of being handed in silently.
-const check = JSON.parse(readFileSync(dossierPath, 'utf8'));
-if (typeof check.text !== 'string' || !check.text.includes('## App')) {
-  throw new Error('dossier.json is missing the ## App text block');
-}
-console.log('wrote ' + dossierPath);
-console.log('dossier: ' + dossier.length + ' bytes, ' + check.images.length + ' screenshots, cover #' + check.cover + ', text ' + Buffer.byteLength(check.text) + ' bytes');
+console.log(`Neon Coast Cover Studio built into ${out}`);

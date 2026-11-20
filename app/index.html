@@ -1,73 +1,60 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Neon Coast Cover Studio</title>
-<link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neon Coast Cover Studio</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="src/main.js"></script>
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">
-    <h1>NEON COAST <span>Cover Studio</span></h1>
-    <p class="tagline">Turn any photo and a caption into GTA-style poster cover art. Offline, no upload.</p>
-  </div>
-  <div class="top-actions">
-    <button id="undoBtn" type="button" disabled>Undo</button>
-    <button id="redoBtn" type="button" disabled>Redo</button>
-  </div>
-</header>
+  <header class="site-header">
+    <h1>Neon Coast Cover Studio</h1>
+    <p class="subtitle">Turn your photo into a GTA 6-style cover</p>
+  </header>
 
-<main class="studio">
-  <section class="controls" aria-label="Cover controls">
-    <div class="panel">
-      <h2>1 · Layout</h2>
-      <div class="btnrow" id="layoutRow"></div>
-    </div>
-
-    <div class="panel">
-      <h2>2 · Colour grade</h2>
-      <div class="swatches" id="gradeRow"></div>
-      <label class="check"><input type="checkbox" id="grainChk" checked> Film grain</label>
-      <label class="check"><input type="checkbox" id="vignetteChk" checked> Vignette</label>
-    </div>
-
-    <div class="panel">
-      <h2>3 · Photos</h2>
-      <div class="btnrow">
-        <button id="samplePier" type="button">Pier sample</button>
-        <button id="sampleBlvd" type="button">Boulevard sample</button>
-        <label class="upload">Upload photos <input id="fileInput" type="file" accept="image/*" multiple hidden></label>
+  <main class="layout">
+    <section class="controls" aria-label="Cover controls">
+      <div class="card">
+        <h2>Photo</h2>
+        <div class="button-row">
+          <button type="button" data-sample="boulevard">Boulevard</button>
+          <button type="button" data-sample="pier">Pier</button>
+        </div>
+        <label class="upload" for="photo-file">Upload your own photo
+          <input type="file" id="photo-file" accept="image/*">
+        </label>
       </div>
-      <p class="hint">Click a panel to select it, drag to move its photo, scroll to zoom. Each panel keeps its own crop.</p>
-      <div class="thumbrow" id="thumbRow"></div>
-    </div>
 
-    <div class="panel">
-      <h2>4 · Caption</h2>
-      <label>Title <input id="titleInput" type="text" value="BOULEVARD QUEEN" maxlength="24"></label>
-      <label>Subtitle <input id="subtitleInput" type="text" value="Night Drive" maxlength="32"></label>
-      <label>Heat <input id="starsInput" type="range" min="0" max="5" step="1" value="4"> <span id="starsLabel">★★★★☆</span></label>
-      <label class="check"><input type="checkbox" id="ribbonChk" checked> “LAUNCH WEEK” ribbon</label>
-    </div>
-
-    <div class="panel">
-      <h2>5 · Export size</h2>
-      <div class="btnrow" id="sizeRow"></div>
-      <div class="btnrow">
-        <button id="exportBtn" type="button" class="primary">Export PNG</button>
-        <button id="exportAllBtn" type="button">All four</button>
+      <div class="card">
+        <h2>Caption</h2>
+        <label for="title">Main caption</label>
+        <input type="text" id="title" value="SUNSET HEIST" maxlength="60" autocomplete="off">
+        <label for="accent">Script accent line</label>
+        <input type="text" id="accent" value="Vice City nights" maxlength="60" autocomplete="off">
       </div>
-      <p class="hint" id="exportNote"></p>
-    </div>
-  </section>
 
-  <section class="stage">
-    <div id="coverStage" class="cover-stage"></div>
-  </section>
-</main>
+      <div class="card">
+        <h2>Size</h2>
+        <div class="sizes" role="radiogroup" aria-label="Export size">
+          <label><input type="radio" name="size" value="square"> Square 1080&times;1080</label>
+          <label><input type="radio" name="size" value="portrait"> Portrait 1080&times;1350</label>
+          <label><input type="radio" name="size" value="wide" checked> Wide 1920&times;1080</label>
+        </div>
+      </div>
 
-<script src="src/cover.js"></script>
-<script src="src/main.js"></script>
+      <button type="button" id="export" class="export-btn">Export PNG</button>
+      <p id="error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="preview" aria-label="Cover preview">
+      <p class="preview-label">Live preview</p>
+      <canvas id="cover" width="1920" height="1080"></canvas>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Works fully offline — your photo never leaves the browser.</p>
+  </footer>
 </body>
 </html>

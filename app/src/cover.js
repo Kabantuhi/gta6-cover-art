@@ -1,544 +1,251 @@
-// Neon Coast Cover Studio — cover rendering engine (round 5 build).
-// Layout math, DOM cover builder and canvas exporter. Fully offline:
-// fonts and photos are local files served with the app.
-(function () {
-  'use strict';
+// Neon Coast Cover Studio — cover renderer.
+// Draws a GTA 6-style cover onto a canvas: sunset/neon grade, a sun,
+// a second inset panel, a diagonal slash, a bold title and a script accent.
+// Everything here is deterministic: the same inputs always paint the same
+// pixels, so screenshots taken from this renderer are stable.
 
-  // Gap between panels, as a fraction of the cover width.
-  var PANEL_GAP = 0.012;
-
-  var LAYOUTS = [
-    { id: 'four', name: 'Four-panel grid', slots: 4 },
-    { id: 'hero', name: 'Hero + three', slots: 4 },
-    { id: 'bleed', name: 'Full bleed', slots: 1 },
-    { id: 'nine', name: 'Nine-panel grid', slots: 8 },
-    { id: 'tilt', name: 'Tilted snapshot', slots: 2 },
-    { id: 'duo', name: 'Diagonal duo', slots: 2 },
-  ];
-
-  var GRADES = [
-    { id: 'sunset', name: 'Sunset', filter: 'sepia(0.32) saturate(1.45) contrast(1.06) brightness(1.02)', tint: '#ff7a18', tintAlpha: 0.10, blend: 'overlay' },
-    { id: 'neon', name: 'Neon Nights', filter: 'saturate(1.65) hue-rotate(-18deg) contrast(1.08)', tint: '#7b2fff', tintAlpha: 0.14, blend: 'overlay' },
-    { id: 'vice', name: 'Vice Pink', filter: 'saturate(1.55) hue-rotate(28deg) contrast(1.05)', tint: '#ff2e9a', tintAlpha: 0.12, blend: 'overlay' },
-    { id: 'teal', name: 'Teal Dusk', filter: 'saturate(1.35) hue-rotate(155deg) brightness(0.98)', tint: '#00c2a8', tintAlpha: 0.10, blend: 'overlay' },
-    { id: 'golden', name: 'Golden Hour', filter: 'sepia(0.45) saturate(1.5) brightness(1.06)', tint: '#ffb400', tintAlpha: 0.12, blend: 'soft-light' },
-  ];
-
-  var SIZES = [
-    { id: '1080x1080', label: '1080 × 1080', w: 1080, h: 1080 },
-    { id: '1080x1350', label: '1080 × 1350', w: 1080, h: 1350 },
-    { id: '1920x1080', label: '1920 × 1080', w: 1920, h: 1080 },
-    { id: '1080x1920', label: '1080 × 1920', w: 1080, h: 1920 },
-  ];
-
-  function findIn(list, id) {
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].id === id) return list[i];
-    }
-    return list[0];
-  }
-  function gradeById(id) { return findIn(GRADES, id); }
-  function layoutById(id) { return findIn(LAYOUTS, id); }
-  function sizeById(id) { return findIn(SIZES, id); }
-
-  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-  function starString(n) {
-    var out = '';
-    for (var i = 0; i < 5; i++) out += i < n ? '★' : '☆';
-    return out;
-  }
-
-  // Panel rects for a layout, in pixels, inside a cover of w x h.
-  // A rect is {x, y, w, h}; tilt adds {rot, frame}, duo adds {poly}.
-  function layoutRects(layoutId, w, h) {
-    var g = Math.round(w * PANEL_GAP);
-    var rects = [];
-    if (layoutId === 'four') {
-      var cw = (w - g) / 2;
-      var ch = (h - g) / 2;
-      rects = [
-        { x: 0, y: 0, w: cw, h: ch },
-        { x: cw + g, y: 0, w: cw, h: ch },
-        { x: 0, y: ch + g, w: cw, h: ch },
-        { x: cw + g, y: ch + g, w: cw, h: ch },
-      ];
-    } else if (layoutId === 'hero') {
-      var leftW = Math.round(w * 0.62);
-      var rightW = w - leftW - g;
-      var rowH = (h - 2 * g) / 3;
-      rects = [
-        { x: 0, y: 0, w: leftW, h: h },
-        { x: leftW + g, y: 0, w: rightW, h: rowH },
-        { x: leftW + g, y: rowH + g, w: rightW, h: rowH },
-        { x: leftW + g, y: 2 * (rowH + g), w: rightW, h: rowH },
-      ];
-    } else if (layoutId === 'bleed') {
-      rects = [{ x: 0, y: 0, w: w, h: h }];
-    } else if (layoutId === 'nine') {
-      var cellW = (w - 2 * g) / 3;
-      var cellH = (h - 2 * g) / 3;
-      var xs = [0, cellW + g, 2 * (cellW + g)];
-      var ys = [0, cellH + g, 2 * (cellH + g)];
-      // Every cell except the centre — the centre holds the title block.
-      var cells = [0, 1, 2, 3, 5, 6, 7, 8];
-      cells.forEach(function (cell) {
-        var cx = cell % 3;
-        var cy = Math.floor(cell / 3);
-        rects.push({ x: xs[cx], y: ys[cy], w: cellW, h: cellH });
-      });
-    } else if (layoutId === 'tilt') {
-      rects = [
-        { x: w * 0.07, y: h * 0.08, w: w * 0.44, h: h * 0.54, rot: -4, frame: true },
-        { x: w * 0.49, y: h * 0.34, w: w * 0.44, h: h * 0.54, rot: 3, frame: true },
-      ];
-    } else if (layoutId === 'duo') {
-      rects = [
-        { x: 0, y: 0, w: w, h: h, poly: [[0, 0], [w * 0.64, 0], [w * 0.36, h], [0, h]] },
-        { x: 0, y: 0, w: w, h: h, poly: [[w * 0.64, 0], [w, 0], [w, h], [w * 0.36, h]] },
-      ];
-    }
-    return rects;
-  }
-
-  // Title zone, as fractions of the cover. Nine-panel uses the centre cell
-  // as its title block; every other layout overlays a band at the bottom.
-  function titleZone(layoutId) {
-    if (layoutId === 'nine') return { x: 1 / 3, y: 1 / 3, w: 1 / 3, h: 1 / 3 };
-    return { x: 0, y: 0.68, w: 1, h: 0.32 };
-  }
-
-  // Inner photo area of a tilted polaroid frame, relative to the frame.
-  function tiltInner(rect) {
-    var padX = rect.w * 0.05;
-    var padTop = rect.h * 0.05;
-    var padBottom = rect.h * 0.16;
-    return { x: padX, y: padTop, w: rect.w - 2 * padX, h: rect.h - padTop - padBottom };
-  }
-
-  // Where an image lands inside a slot, given a crop {dx, dy, zoom}.
-  // dx/dy are fractions of the slot size, zoom is >= 1. Returns offsets
-  // and size relative to the slot's top-left corner.
-  function cropBox(slot, img, crop) {
-    var iw = img.naturalWidth || img.width;
-    var ih = img.naturalHeight || img.height;
-    var base = Math.max(slot.w / iw, slot.h / ih);
-    var dw = iw * base * crop.zoom;
-    var dh = ih * base * crop.zoom;
-    return {
-      x: (slot.w - dw) / 2 + (crop.dx || 0) * slot.w,
-      y: (slot.h - dh) / 2 + (crop.dy || 0) * slot.h,
-      w: dw,
-      h: dh,
-    };
-  }
-
-  // Keep a crop covering its slot after a drag or a zoom.
-  function clampCrop(slot, img, crop) {
-    crop.zoom = clamp(crop.zoom || 1, 1, 3);
-    var box = cropBox(slot, img, crop);
-    var maxX = box.w > slot.w ? (box.w - slot.w) / (2 * slot.w) : 0;
-    var maxY = box.h > slot.h ? (box.h - slot.h) / (2 * slot.h) : 0;
-    crop.dx = clamp(crop.dx || 0, -maxX, maxX);
-    crop.dy = clamp(crop.dy || 0, -maxY, maxY);
-    return crop;
-  }
-
-  // Position a slot's <img> from its crop (DOM preview path). ox/oy shift
-  // the image inside a frame (tilted polaroids).
-  function positionSlotImg(imgEl, slot, img, crop, ox, oy) {
-    var box = cropBox(slot, img, crop);
-    imgEl.style.left = ((ox || 0) + box.x) + 'px';
-    imgEl.style.top = ((oy || 0) + box.y) + 'px';
-    imgEl.style.width = box.w + 'px';
-    imgEl.style.height = box.h + 'px';
-  }
-
-  // One shared film-grain tile, drawn once and reused by DOM and canvas.
-  var cachedNoise = null;
-  function noiseCanvas() {
-    if (cachedNoise) return cachedNoise;
-    var c = document.createElement('canvas');
-    c.width = 128;
-    c.height = 128;
-    var x = c.getContext('2d');
-    var d = x.createImageData(128, 128);
-    for (var i = 0; i < d.data.length; i += 4) {
-      var v = (Math.random() * 255) | 0;
-      d.data[i] = v;
-      d.data[i + 1] = v;
-      d.data[i + 2] = v;
-      d.data[i + 3] = (Math.random() * 26) | 0;
-    }
-    x.putImageData(d, 0, 0);
-    cachedNoise = c;
-    return c;
-  }
-  function noiseURL() { return noiseCanvas().toDataURL('image/png'); }
-
-  // Largest Anton size that fits `text` inside maxWidth, shrinking from
-  // startPx. Uses an offscreen canvas so DOM and export agree.
-  var measureCtx = null;
-  function fitTitleSize(text, startPx, maxWidth) {
-    if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
-    var size = startPx;
-    while (size > 10) {
-      measureCtx.font = size + 'px Anton, sans-serif';
-      if (measureCtx.measureText(text).width <= maxWidth) break;
-      size -= 2;
-    }
-    return size;
-  }
-
-  function px(v) { return Math.round(v) + 'px'; }
-
-  // Build the cover DOM inside `mount` (which must already be sized).
-  function buildCover(state, images, mount, selected) {
-    var w = mount.clientWidth || 720;
-    var h = mount.clientHeight || 720;
-    var cover = document.createElement('div');
-    cover.className = 'cover';
-    cover.style.width = px(w);
-    cover.style.height = px(h);
-    var grade = gradeById(state.grade);
-    var rects = layoutRects(state.layout, w, h);
-
-    // Tilted layout: the first photo also fills the background, dimmed.
-    if (state.layout === 'tilt') {
-      var first = state.assign[0] ? state.assign[0].photo : null;
-      var bg = images.get(first);
-      if (bg) {
-        var bgWrap = document.createElement('div');
-        bgWrap.className = 'cover-bg';
-        var bgImg = document.createElement('img');
-        bgImg.src = bg.src;
-        bgImg.style.filter = grade.filter;
-        positionSlotImg(bgImg, { w: w, h: h }, bg, { dx: 0, dy: 0, zoom: 1.15 });
-        bgWrap.appendChild(bgImg);
-        cover.appendChild(bgWrap);
-      }
-    }
-
-    rects.forEach(function (rect, i) {
-      var assign = state.assign[i] || { photo: null, dx: 0, dy: 0, zoom: 1 };
-      var img = images.get(assign.photo);
-      if (!img) return;
-
-      if (rect.frame) {
-        var frame = document.createElement('div');
-        frame.className = 'slot frame';
-        frame.dataset.slot = String(i);
-        frame.style.left = px(rect.x);
-        frame.style.top = px(rect.y);
-        frame.style.width = px(rect.w);
-        frame.style.height = px(rect.h);
-        frame.style.transform = 'rotate(' + rect.rot + 'deg)';
-        var inner = tiltInner(rect);
-        var framePhoto = document.createElement('img');
-        framePhoto.src = img.src;
-        framePhoto.style.filter = grade.filter;
-        positionSlotImg(framePhoto, inner, img, assign, inner.x, inner.y);
-        frame.appendChild(framePhoto);
-        if (selected === i) frame.classList.add('selected');
-        cover.appendChild(frame);
-        return;
-      }
-
-      var slot = document.createElement('div');
-      slot.className = 'slot';
-      slot.dataset.slot = String(i);
-      slot.style.left = px(rect.x);
-      slot.style.top = px(rect.y);
-      slot.style.width = px(rect.w);
-      slot.style.height = px(rect.h);
-      if (rect.poly) {
-        slot.style.clipPath = 'polygon(' + rect.poly.map(function (p) {
-          return (p[0] / w * 100).toFixed(2) + '% ' + (p[1] / h * 100).toFixed(2) + '%';
-        }).join(', ') + ')';
-      }
-      var photoEl = document.createElement('img');
-      photoEl.src = img.src;
-      photoEl.style.filter = grade.filter;
-      var slotBox = rect.poly ? { w: w, h: h } : rect;
-      positionSlotImg(photoEl, slotBox, img, assign);
-      slot.appendChild(photoEl);
-      if (selected === i) slot.classList.add('selected');
-      cover.appendChild(slot);
-    });
-
-    // Colour grade tint over the whole cover.
-    var tint = document.createElement('div');
-    tint.className = 'cover-tint';
-    tint.style.background = grade.tint;
-    tint.style.opacity = String(grade.tintAlpha);
-    tint.style.mixBlendMode = grade.blend;
-    cover.appendChild(tint);
-
-    // Title block.
-    var zone = titleZone(state.layout);
-    var zx = zone.x * w;
-    var zy = zone.y * h;
-    var zw = zone.w * w;
-    var zh = zone.h * h;
-    var titleEl = document.createElement('div');
-    titleEl.className = 'cover-title ' + (state.layout === 'nine' ? 'cell' : 'band');
-    titleEl.style.left = px(zx);
-    titleEl.style.top = px(zy);
-    titleEl.style.width = px(zw);
-    titleEl.style.height = px(zh);
-    var tSize = fitTitleSize(state.title, Math.floor(zw * 0.17), zw * 0.94);
-    var h1 = document.createElement('div');
-    h1.className = 'cover-title-text';
-    h1.textContent = state.title;
-    h1.style.fontSize = px(tSize);
-    var sub = document.createElement('div');
-    sub.className = 'cover-subtitle';
-    sub.textContent = state.subtitle;
-    sub.style.fontSize = px(Math.floor(tSize * 0.52));
-    var stars = document.createElement('div');
-    stars.className = 'cover-stars';
-    stars.textContent = starString(state.stars);
-    stars.style.fontSize = px(Math.floor(tSize * 0.34));
-    titleEl.appendChild(h1);
-    titleEl.appendChild(sub);
-    titleEl.appendChild(stars);
-    cover.appendChild(titleEl);
-
-    // Ribbon across the top-right corner. Its centre sits a little inside
-    // the corner (not on it), so the band and its text stay visible
-    // instead of hanging mostly off the canvas.
-    if (state.ribbon) {
-      var ribbon = document.createElement('div');
-      ribbon.className = 'cover-ribbon';
-      var rw = Math.floor(w * 0.42);
-      var bh = Math.max(16, Math.floor(w * 0.045));
-      var rs = rw * 0.18;
-      ribbon.style.width = px(rw);
-      ribbon.style.left = px(w - rs - rw / 2);
-      ribbon.style.top = px(rs - bh / 2);
-      ribbon.style.padding = px(Math.max(4, Math.floor(w * 0.008))) + ' 0';
-      ribbon.style.fontSize = px(Math.max(12, Math.floor(w * 0.028)));
-      ribbon.style.transform = 'rotate(45deg)';
-      var span = document.createElement('span');
-      span.textContent = 'LAUNCH WEEK';
-      ribbon.appendChild(span);
-      cover.appendChild(ribbon);
-    }
-
-    if (state.grain) {
-      var grain = document.createElement('div');
-      grain.className = 'cover-grain';
-      grain.style.backgroundImage = 'url(' + noiseURL() + ')';
-      cover.appendChild(grain);
-    }
-    if (state.vignette) {
-      var vig = document.createElement('div');
-      vig.className = 'cover-vignette';
-      cover.appendChild(vig);
-    }
-
-    mount.innerHTML = '';
-    mount.appendChild(cover);
-    return cover;
-  }
-
-  // Draw the cover onto a canvas at exact export size.
-  function renderToCanvas(state, images, w, h) {
-    var canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    var ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#150a2e';
-    ctx.fillRect(0, 0, w, h);
-    var grade = gradeById(state.grade);
-    var rects = layoutRects(state.layout, w, h);
-
-    if (state.layout === 'tilt') {
-      var first = state.assign[0] ? state.assign[0].photo : null;
-      var bg = images.get(first);
-      if (bg) {
-        ctx.save();
-        ctx.filter = grade.filter;
-        ctx.globalAlpha = 0.55;
-        var b = cropBox({ w: w, h: h }, bg, { dx: 0, dy: 0, zoom: 1.15 });
-        ctx.drawImage(bg, b.x, b.y, b.w, b.h);
-        ctx.restore();
-      }
-    }
-
-    rects.forEach(function (rect, i) {
-      var assign = state.assign[i] || { photo: null, dx: 0, dy: 0, zoom: 1 };
-      var img = images.get(assign.photo);
-      if (!img) return;
-      ctx.save();
-
-      if (rect.frame) {
-        var cx = rect.x + rect.w / 2;
-        var cy = rect.y + rect.h / 2;
-        ctx.translate(cx, cy);
-        ctx.rotate(rect.rot * Math.PI / 180);
-        ctx.fillStyle = '#fdf8ef';
-        ctx.fillRect(-rect.w / 2, -rect.h / 2, rect.w, rect.h);
-        var inner = tiltInner(rect);
-        ctx.beginPath();
-        ctx.rect(-rect.w / 2 + inner.x, -rect.h / 2 + inner.y, inner.w, inner.h);
-        ctx.clip();
-        ctx.filter = grade.filter;
-        var fbox = cropBox(inner, img, assign);
-        ctx.drawImage(img, -rect.w / 2 + inner.x + fbox.x, -rect.h / 2 + inner.y + fbox.y, fbox.w, fbox.h);
-        ctx.restore();
-        return;
-      }
-
-      if (rect.poly) {
-        ctx.beginPath();
-        rect.poly.forEach(function (p, k) {
-          if (k === 0) ctx.moveTo(p[0], p[1]);
-          else ctx.lineTo(p[0], p[1]);
-        });
-        ctx.closePath();
-        ctx.clip();
-        ctx.filter = grade.filter;
-        var pbox = cropBox({ w: w, h: h }, img, assign);
-        ctx.drawImage(img, pbox.x, pbox.y, pbox.w, pbox.h);
-        ctx.restore();
-        return;
-      }
-
-      ctx.beginPath();
-      ctx.rect(rect.x, rect.y, rect.w, rect.h);
-      ctx.clip();
-      ctx.filter = grade.filter;
-      var rbox = cropBox(rect, img, assign);
-      ctx.drawImage(img, rect.x + rbox.x, rect.y + rbox.y, rbox.w, rbox.h);
-      ctx.restore();
-    });
-
-    // Diagonal seam for the duo layout.
-    if (state.layout === 'duo') {
-      ctx.save();
-      ctx.strokeStyle = '#150a2e';
-      ctx.lineWidth = Math.max(4, w * 0.006);
-      ctx.beginPath();
-      ctx.moveTo(w * 0.64, 0);
-      ctx.lineTo(w * 0.36, h);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // Colour grade tint over the whole cover.
-    ctx.save();
-    ctx.globalCompositeOperation = grade.blend;
-    ctx.globalAlpha = grade.tintAlpha;
-    ctx.fillStyle = grade.tint;
-    ctx.fillRect(0, 0, w, h);
-    ctx.restore();
-
-    // Title block.
-    var zone = titleZone(state.layout);
-    var zx = zone.x * w;
-    var zy = zone.y * h;
-    var zw = zone.w * w;
-    var zh = zone.h * h;
-    if (state.layout === 'nine') {
-      ctx.fillStyle = '#150a2e';
-      ctx.fillRect(zx, zy, zw, zh);
-    } else {
-      var grad = ctx.createLinearGradient(0, zy, 0, zy + zh);
-      grad.addColorStop(0, 'rgba(10,2,28,0)');
-      grad.addColorStop(1, 'rgba(10,2,28,0.62)');
-      ctx.fillStyle = grad;
-      ctx.fillRect(zx, zy, zw, zh);
-    }
-    var tSize = fitTitleSize(state.title, Math.floor(zw * 0.17), zw * 0.94);
-    var cxT = zx + zw / 2;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = tSize + 'px Anton, sans-serif';
-    ctx.lineWidth = Math.max(2, tSize * 0.09);
-    ctx.strokeStyle = '#0a021c';
-    ctx.lineJoin = 'round';
-    var titleY = zy + zh * 0.36;
-    ctx.strokeText(state.title, cxT, titleY);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(state.title, cxT, titleY);
-    var subSize = Math.floor(tSize * 0.52);
-    ctx.font = subSize + 'px Pacifico, cursive';
-    ctx.shadowColor = '#ff2e9a';
-    ctx.shadowBlur = subSize * 0.5;
-    ctx.fillStyle = '#ff5db1';
-    ctx.fillText(state.subtitle, cxT, zy + zh * 0.64);
-    ctx.shadowBlur = 0;
-    var starSize = Math.floor(tSize * 0.34);
-    ctx.font = starSize + 'px Anton, sans-serif';
-    ctx.fillStyle = '#ffc93c';
-    ctx.fillText(starString(state.stars), cxT, zy + zh * 0.86);
-
-    // Ribbon across the top-right corner, centred a little inside it so
-    // the band and its text stay visible.
-    if (state.ribbon) {
-      var bw = w * 0.42;
-      var bh = Math.max(20, w * 0.045);
-      var bs = bw * 0.18;
-      ctx.save();
-      ctx.translate(w - bs, bs);
-      ctx.rotate(Math.PI / 4);
-      ctx.fillStyle = '#ff2e7e';
-      ctx.fillRect(-bw / 2, -bh / 2, bw, bh);
-      ctx.fillStyle = '#ffffff';
-      ctx.font = Math.floor(bh * 0.5) + 'px Anton, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('LAUNCH WEEK', 0, 1);
-      ctx.restore();
-    }
-
-    if (state.grain) {
-      ctx.save();
-      ctx.globalAlpha = 0.5;
-      ctx.globalCompositeOperation = 'overlay';
-      ctx.fillStyle = ctx.createPattern(noiseCanvas(), 'repeat');
-      ctx.fillRect(0, 0, w, h);
-      ctx.restore();
-    }
-    if (state.vignette) {
-      var vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.32, w / 2, h / 2, Math.max(w, h) * 0.72);
-      vg.addColorStop(0, 'rgba(8,0,24,0)');
-      vg.addColorStop(1, 'rgba(8,0,24,0.55)');
-      ctx.fillStyle = vg;
-      ctx.fillRect(0, 0, w, h);
-    }
-    return canvas;
-  }
-
-  function exportPNG(state, images, w, h) {
-    var canvas = renderToCanvas(state, images, w, h);
-    return new Promise(function (resolve, reject) {
-      canvas.toBlob(function (blob) {
-        if (blob) resolve(blob);
-        else reject(new Error('canvas export produced no blob'));
-      }, 'image/png');
-    });
-  }
-
-  window.NeonCoast = {
-    LAYOUTS: LAYOUTS,
-    GRADES: GRADES,
-    SIZES: SIZES,
-    layoutById: layoutById,
-    gradeById: gradeById,
-    sizeById: sizeById,
-    layoutRects: layoutRects,
-    titleZone: titleZone,
-    tiltInner: tiltInner,
-    cropBox: cropBox,
-    clampCrop: clampCrop,
-    positionSlotImg: positionSlotImg,
-    noiseURL: noiseURL,
-    fitTitleSize: fitTitleSize,
-    starString: starString,
-    buildCover: buildCover,
-    renderToCanvas: renderToCanvas,
-    exportPNG: exportPNG,
+/** A tiny seeded generator, so the film grain never changes between runs. */
+function seededRandom(seed) {
+  let s = seed >>> 0;
+  return function next() {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
   };
-})();
+}
+
+/** Draw `img` to fill `w` x `h` (center-crop "cover" fit). */
+function drawCoverFit(ctx, img, x, y, w, h) {
+  const iw = img.naturalWidth || img.width;
+  const ih = img.naturalHeight || img.height;
+  if (!iw || !ih || w <= 0 || h <= 0) return;
+  const scale = Math.max(w / iw, h / ih);
+  const dw = iw * scale;
+  const dh = ih * scale;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+}
+
+/** Wrap `text` into at most `maxLines` lines at the given font. */
+function wrapLines(ctx, text, maxWidth, maxLines) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    const trial = current ? `${current} ${word}` : word;
+    if (ctx.measureText(trial).width <= maxWidth || !current) {
+      current = trial;
+    } else {
+      lines.push(current);
+      current = word;
+      if (lines.length === maxLines - 1) break;
+    }
+  }
+  if (current) lines.push(current);
+  // If words remain after the last allowed line, fold them in with an ellipsis.
+  if (lines.length === maxLines) {
+    const used = lines.join(' ').split(/\s+/).length;
+    if (used < words.length) {
+      let last = lines[lines.length - 1];
+      while (last.length > 3 && ctx.measureText(`${last}…`).width > maxWidth) {
+        last = last.slice(0, -1);
+      }
+      lines[lines.length - 1] = `${last}…`;
+    }
+  }
+  return lines;
+}
+
+/**
+ * Paint a GTA 6-style cover.
+ * @param {HTMLCanvasElement} canvas
+ * @param {{image: HTMLImageElement|null, title: string, accent: string, width: number, height: number}} opts
+ */
+export function drawCover(canvas, opts) {
+  const { image, title, accent, width, height } = opts;
+  const w = Math.max(1, Math.round(width) || 1080);
+  const h = Math.max(1, Math.round(height) || 1080);
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const hasImage = image && (image.naturalWidth || image.width) > 0 && (image.naturalHeight || image.height) > 0;
+
+  // 1. Base.
+  ctx.fillStyle = '#0b0b1a';
+  ctx.fillRect(0, 0, w, h);
+
+  // 2. Photo, cover fit.
+  if (hasImage) drawCoverFit(ctx, image, 0, 0, w, h);
+
+  // 3. Sunset / neon grade: vertical wash from clear sky to hot magenta-purple floor.
+  const grade = ctx.createLinearGradient(0, 0, 0, h);
+  grade.addColorStop(0.0, 'rgba(255, 122, 24, 0)');
+  grade.addColorStop(0.35, 'rgba(255, 122, 24, 0.12)');
+  grade.addColorStop(0.62, 'rgba(255, 122, 24, 0.35)');
+  grade.addColorStop(0.82, 'rgba(255, 45, 120, 0.45)');
+  grade.addColorStop(1.0, 'rgba(123, 47, 255, 0.50)');
+  ctx.fillStyle = grade;
+  ctx.fillRect(0, 0, w, h);
+
+  // Warm radial glow, top-right, like late sun on glass.
+  const glow = ctx.createRadialGradient(w * 0.82, h * 0.14, 0, w * 0.82, h * 0.14, w * 0.55);
+  glow.addColorStop(0, 'rgba(255, 190, 80, 0.38)');
+  glow.addColorStop(0.55, 'rgba(255, 122, 24, 0.14)');
+  glow.addColorStop(1, 'rgba(255, 122, 24, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, w, h);
+
+  // 5. The sun: a big disc, top-right, yellow core melting into orange and pink.
+  const sunR = Math.min(w, h) * 0.13;
+  const sunX = w * 0.80;
+  const sunY = h * 0.20;
+  const sunGlow = ctx.createRadialGradient(sunX, sunY, sunR * 0.2, sunX, sunY, sunR * 2.4);
+  sunGlow.addColorStop(0, 'rgba(255, 214, 90, 0.55)');
+  sunGlow.addColorStop(0.5, 'rgba(255, 122, 24, 0.18)');
+  sunGlow.addColorStop(1, 'rgba(255, 122, 24, 0)');
+  ctx.fillStyle = sunGlow;
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, sunR * 2.4, 0, Math.PI * 2);
+  ctx.fill();
+  const sun = ctx.createLinearGradient(sunX, sunY - sunR, sunX, sunY + sunR);
+  sun.addColorStop(0, '#ffe14d');
+  sun.addColorStop(0.55, '#ff7a18');
+  sun.addColorStop(1, '#ff2d78');
+  ctx.fillStyle = sun;
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 4. Second inset panel, bottom-right: the same photo with a different crop,
+  // a thick white frame and a drop shadow — the multi-panel GTA feel.
+  if (hasImage) {
+    const pw = w * 0.38;
+    const ph = h * 0.45;
+    const px = w - pw - w * 0.045;
+    const py = h - ph - h * 0.06;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.65)';
+    ctx.shadowBlur = w * 0.02;
+    ctx.shadowOffsetX = -w * 0.008;
+    ctx.shadowOffsetY = h * 0.012;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(px - 4, py - 4, pw + 8, ph + 8);
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, pw, ph);
+    ctx.clip();
+    // A different crop: zoom in and shift the focus up-left.
+    const iw = image.naturalWidth || image.width;
+    const ih = image.naturalHeight || image.height;
+    const zoom = Math.max(pw / iw, ph / ih) * 1.35;
+    const dw = iw * zoom;
+    const dh = ih * zoom;
+    ctx.drawImage(image, px + (pw - dw) / 2 - pw * 0.08, py + (ph - dh) / 2 - ph * 0.06, dw, dh);
+    const panelGrade = ctx.createLinearGradient(px, py, px, py + ph);
+    panelGrade.addColorStop(0, 'rgba(255, 122, 24, 0.05)');
+    panelGrade.addColorStop(1, 'rgba(123, 47, 255, 0.35)');
+    ctx.fillStyle = panelGrade;
+    ctx.fillRect(px, py, pw, ph);
+    ctx.restore();
+  }
+
+  // One thin diagonal slash bar across the canvas, neon cyan, for style.
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(-0.32);
+  ctx.fillStyle = 'rgba(0, 229, 255, 0.9)';
+  ctx.fillRect(-w * 0.62, -h * 0.012, w * 1.24, h * 0.008);
+  ctx.fillStyle = 'rgba(255, 45, 120, 0.85)';
+  ctx.fillRect(-w * 0.62, h * 0.004, w * 1.24, h * 0.004);
+  ctx.restore();
+
+  // Vignette: dark edges pull the eye to the middle.
+  const vig = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.42, w / 2, h / 2, Math.max(w, h) * 0.75);
+  vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vig.addColorStop(1, 'rgba(5, 5, 20, 0.55)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, w, h);
+
+  // 8. "NEON COAST" tag, top-left, letter-spaced, white with a black outline.
+  const tagSize = Math.max(14, w * 0.028);
+  ctx.save();
+  ctx.font = `${tagSize}px Anton, 'Arial Black', sans-serif`;
+  ctx.textBaseline = 'alphabetic';
+  const tag = 'N E O N   C O A S T';
+  ctx.lineWidth = Math.max(2, tagSize * 0.18);
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.lineJoin = 'round';
+  ctx.strokeText(tag, w * 0.04, h * 0.065);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(tag, w * 0.04, h * 0.065);
+  ctx.restore();
+
+  // 6. Title: big Anton caps, white fill, black outline, pink drop shadow.
+  // The accent sits above the TOP line of the title (not the bottom one),
+  // so a two-line title never paints over it.
+  const accentText = (accent || '').trim();
+  const titleText = (title || 'SUNSET HEIST').trim().toUpperCase() || 'SUNSET HEIST';
+  const titleSize = w * 0.11;
+  const accentSize = w * 0.05;
+  const margin = w * 0.05;
+  const titleBottom = h * 0.94;
+  const lineHeight = titleSize * 1.02;
+
+  ctx.save();
+  ctx.translate(margin, titleBottom);
+  ctx.rotate(-0.035); // about -2 degrees
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.font = `${titleSize}px Anton, 'Arial Black', sans-serif`;
+  const maxTitleWidth = w - margin * 2 - w * 0.42; // keep clear of the inset panel
+  const lines = wrapLines(ctx, titleText, maxTitleWidth, 2);
+
+  if (accentText) {
+    ctx.font = `${accentSize}px Pacifico, cursive`;
+    ctx.shadowColor = 'rgba(0, 229, 255, 0.9)';
+    ctx.shadowBlur = accentSize * 0.35;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.lineWidth = Math.max(2, accentSize * 0.12);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.lineJoin = 'round';
+    // Clear the title's top line entirely: the accent baseline must sit
+    // above the top line's cap height plus the accent's own descenders.
+    const accentY = -((lines.length - 1) * lineHeight) - lineHeight * 0.85 - accentSize * 0.3;
+    ctx.strokeText(accentText, 0, accentY);
+    ctx.fillStyle = '#ffe14d';
+    ctx.fillText(accentText, 0, accentY);
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.shadowColor = 'rgba(255, 45, 120, 0.9)';
+  ctx.shadowBlur = titleSize * 0.22;
+  ctx.shadowOffsetX = titleSize * 0.05;
+  ctx.shadowOffsetY = titleSize * 0.06;
+  ctx.lineWidth = Math.max(3, titleSize * 0.09);
+  ctx.strokeStyle = '#000000';
+  ctx.lineJoin = 'round';
+  // Re-assert the Anton font: the accent block above switched ctx.font to Pacifico.
+  ctx.font = `${titleSize}px Anton, 'Arial Black', sans-serif`;
+  lines.forEach((line, i) => {
+    const y = -((lines.length - 1 - i) * lineHeight);
+    ctx.strokeText(line, 0, y);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(line, 0, y);
+  });
+  ctx.restore();
+
+  // 9. Deterministic film grain: ~800 tiny dots, seeded, low alpha.
+  const rand = seededRandom(1337 + w * 7 + h * 13);
+  ctx.save();
+  for (let i = 0; i < 800; i++) {
+    const gx = rand() * w;
+    const gy = rand() * h;
+    const bright = rand() > 0.5;
+    ctx.fillStyle = bright ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.06)';
+    ctx.fillRect(gx, gy, 1.4, 1.4);
+  }
+  ctx.restore();
+}
